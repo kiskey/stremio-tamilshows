@@ -152,6 +152,7 @@ class RedisManager:
         """
         Updates poster URLs for all catalog items in Redis if their domain matches old_domain.
         Handles both 'poster_thumbnail' and 'poster_medium' fields.
+        This is for RSS-parsed posters, but kept for compatibility.
         """
         try:
             keys = self.client.keys("catalog:*")
@@ -159,15 +160,15 @@ class RedisManager:
             for key in keys:
                 item_data = self.client.hgetall(key)
                 
-                # Check and update poster_thumbnail
-                if 'poster_thumbnail' in item_data and old_domain in item_data['poster_thumbnail']:
+                # Check and update poster_thumbnail (only if it's not a TMDb poster)
+                if 'poster_thumbnail' in item_data and old_domain in item_data['poster_thumbnail'] and "image.tmdb.org" not in item_data['poster_thumbnail']:
                     new_poster_url = item_data['poster_thumbnail'].replace(old_domain, new_domain)
                     self.client.hset(key, 'poster_thumbnail', new_poster_url)
                     updated_count += 1
                     logger.info(f"Updated thumbnail poster domain for {item_data.get('id', 'N/A')}: {item_data['poster_thumbnail']} -> {new_poster_url}")
                 
-                # Check and update poster_medium
-                if 'poster_medium' in item_data and old_domain in item_data['poster_medium']:
+                # Check and update poster_medium (only if it's not a TMDb poster)
+                if 'poster_medium' in item_data and old_domain in item_data['poster_medium'] and "image.tmdb.org" not in item_data['poster_medium']:
                     new_poster_url = item_data['poster_medium'].replace(old_domain, new_domain)
                     self.client.hset(key, 'poster_medium', new_poster_url)
                     updated_count += 1
@@ -176,7 +177,7 @@ class RedisManager:
             if updated_count > 0:
                 logger.info(f"Updated domains for {updated_count} poster URLs from '{old_domain}' to '{new_domain}'.")
             else:
-                logger.info(f"No poster URLs found to update for domain '{old_domain}'.")
+                logger.info(f"No non-TMDb poster URLs found to update for domain '{old_domain}'.")
 
         except Exception as e:
             logger.error(f"Error updating poster domains in Redis: {e}")
@@ -303,54 +304,105 @@ class DomainResolver:
             return initial_rss_feed_url # Fallback to initial if resolution fails
 
 # --- TMDB API Manager ---
-# TMDB API Manager is no longer used for ID generation, but kept for reference if future meta needs arise.
 class TmdbManager:
-    """Manages interactions with TMDB API for metadata."""
+    """Manages interactions with TMDB API for metadata and images."""
     def __init__(self, api_key):
         self.api_key = api_key
         self.base_url = "https://api.themoviedb.org/3"
+        self.image_base_url = "https://image.tmdb.org/t/p/" # Default, will be updated by configuration
+        self.poster_sizes = []
+        self._get_configuration()
 
-    def search_movie_or_tv(self, title, year, item_type="movie"):
-        """Searches TMDB for a movie or TV show by title and year."""
+    def _get_configuration(self):
+        """Fetches TMDb API configuration, including image base URL and sizes."""
         if not self.api_key:
-            logger.warning("TMDB_API_KEY is not set. Skipping TMDB search.")
-            return None
+            logger.warning("TMDB_API_KEY is not set. Cannot fetch TMDb configuration.")
+            return
 
-        endpoint = f"{self.base_url}/search/{item_type}"
-        params = {
+        config_url = f"{self.base_url}/configuration?api_key={self.api_key}"
+        try:
+            response = requests.get(config_url, timeout=5)
+            response.raise_for_status()
+            config = response.json()
+            if 'images' in config:
+                self.image_base_url = config['images']['secure_base_url'] + 't/p/'
+                self.poster_sizes = config['images']['poster_sizes']
+                logger.info(f"TMDb image configuration loaded. Base URL: {self.image_base_url}, Sizes: {self.poster_sizes}")
+        except requests.exceptions.RequestException as e:
+            logger.error(f"Error fetching TMDb configuration: {e}")
+
+    def get_image_url(self, file_path, size="w500"):
+        """Constructs a full TMDb image URL."""
+        if not file_path:
+            return ""
+        
+        chosen_size = size
+        if size not in self.poster_sizes and self.poster_sizes:
+            # Fallback to a common size or 'original' if specific size not found
+            if "w500" in self.poster_sizes:
+                chosen_size = "w500"
+            elif "original" in self.poster_sizes:
+                chosen_size = "original"
+            elif self.poster_sizes: # If any sizes exist, pick the first one
+                chosen_size = self.poster_sizes[0]
+            else: # No sizes at all, fallback to a hardcoded common size
+                chosen_size = "w500" 
+            logger.warning(f"Requested TMDb image size '{size}' not found. Using '{chosen_size}'.")
+        
+        return f"{self.image_base_url}{chosen_size}{file_path}"
+
+    def search_movie_or_tv(self, title, year, language="en-US"):
+        """
+        Searches TMDb for a movie or TV show by title and year.
+        Returns the first relevant result with a poster path and its type.
+        """
+        if not self.api_key:
+            logger.warning("TMDB_API_KEY is not set. Skipping TMDb search.")
+            return None, None
+
+        # Try searching for TV series first
+        tv_endpoint = f"{self.base_url}/search/tv"
+        tv_params = {
             "api_key": self.api_key,
             "query": title,
-            "year": year,
-            "language": "en-US"
+            "first_air_date_year": year, # For TV series, use first_air_date_year
+            "language": language
         }
         try:
-            response = requests.get(endpoint, params=params, timeout=5)
-            response.raise_for_status()
-            data = response.json()
-            if data and data['results']:
-                # Return the first result
-                return data['results'][0]
-            return None
+            tv_response = requests.get(tv_endpoint, params=tv_params, timeout=5)
+            tv_response.raise_for_status()
+            tv_data = tv_response.json()
+            if tv_data and tv_data['results']:
+                for result in tv_data['results']:
+                    if result.get('poster_path'):
+                        logger.debug(f"Found TV poster for '{title}' on TMDb: {result['poster_path']}")
+                        return result, "tv"
         except requests.exceptions.RequestException as e:
-            logger.error(f"Error searching TMDB for '{title}' ({year}): {e}")
-            return None
+            logger.error(f"Error searching TMDb TV for '{title}' ({year}): {e}")
 
-    def get_external_ids(self, tmdb_id, item_type="movie"):
-        """Fetches external IDs (like IMDb ID) for a given TMDB ID."""
-        if not self.api_key:
-            logger.warning("TMDB_API_KEY is not set. Cannot fetch external IDs.")
-            return None
-
-        endpoint = f"{self.base_url}/{item_type}/{tmdb_id}/external_ids"
-        params = {"api_key": self.api_key}
+        # Fallback to searching for movies
+        movie_endpoint = f"{self.base_url}/search/movie"
+        movie_params = {
+            "api_key": self.api_key,
+            "query": title,
+            "year": year, # For movies, use year
+            "language": language
+        }
         try:
-            response = requests.get(endpoint, params=params, timeout=5)
-            response.raise_for_status()
-            data = response.json()
-            return data
+            movie_response = requests.get(movie_endpoint, params=movie_params, timeout=5)
+            movie_response.raise_for_status()
+            movie_data = movie_response.json()
+            if movie_data and movie_data['results']:
+                for result in movie_data['results']:
+                    if result.get('poster_path'):
+                        logger.debug(f"Found Movie poster for '{title}' on TMDb: {result['poster_path']}")
+                        return result, "movie"
         except requests.exceptions.RequestException as e:
-            logger.error(f"Error fetching external IDs for TMDB ID '{tmdb_id}': {e}")
-            return None
+            logger.error(f"Error searching TMDb Movie for '{title}' ({year}): {e}")
+
+        logger.info(f"No suitable poster found on TMDb for '{title}' ({year}).")
+        return None, None
+
 
 # --- Tracker Manager ---
 class TrackerManager:
@@ -399,8 +451,9 @@ class TrackerManager:
 # --- RSS Parser ---
 class RSSParser:
     """Parses RSS feed items and extracts relevant data."""
-    def __init__(self, domain_resolver):
+    def __init__(self, domain_resolver, tmdb_manager): # Add tmdb_manager to constructor
         self.domain_resolver = domain_resolver
+        self.tmdb_manager = tmdb_manager # Store tmdb_manager
 
     def parse_rss_feed(self, feed_url):
         """
@@ -554,9 +607,10 @@ class RSSParser:
                     file_size = file_size or ""
 
 
-                    # --- Poster URL Parsing ---
-                    catalog_poster_url = ""
-                    meta_poster_url = ""
+                    # --- Poster URL Parsing (Original, as fallback) ---
+                    # This logic will be superseded by TMDb if a poster is found there
+                    catalog_poster_from_rss = ""
+                    meta_poster_from_rss = ""
 
                     primary_img_tag = None
                     all_ips_images = soup_desc.find_all('img', class_='ipsImage', attrs={'data-src': True})
@@ -598,17 +652,37 @@ class RSSParser:
                             break 
 
                     if primary_img_tag:
-                        meta_poster_url = primary_img_tag['data-src']
-                        if '.md.jpg' in meta_poster_url:
-                            catalog_poster_url = meta_poster_url.replace('.md.jpg', '.th.jpg')
+                        meta_poster_from_rss = primary_img_tag['data-src']
+                        if '.md.jpg' in meta_poster_from_rss:
+                            catalog_poster_from_rss = meta_poster_from_rss.replace('.md.jpg', '.th.jpg')
                         else:
-                            catalog_poster_url = meta_poster_url
+                            catalog_poster_from_rss = meta_poster_from_rss
                     
-                    catalog_poster_url = catalog_poster_url or ""
-                    meta_poster_url = meta_poster_url or ""
+                    catalog_poster_from_rss = catalog_poster_from_rss or ""
+                    meta_poster_from_rss = meta_poster_from_rss or ""
 
+                    # --- TMDb Poster Retrieval ---
+                    tmdb_poster_thumbnail_url = ""
+                    tmdb_poster_medium_url = ""
+                    
+                    if self.tmdb_manager.api_key: # Only try TMDb if API key is set
+                        tmdb_result, tmdb_type = self.tmdb_manager.search_movie_or_tv(title, year)
+                        if tmdb_result and tmdb_result.get('poster_path'):
+                            poster_path = tmdb_result['poster_path']
+                            tmdb_poster_thumbnail_url = self.tmdb_manager.get_image_url(poster_path, "w185")
+                            tmdb_poster_medium_url = self.tmdb_manager.get_image_url(poster_path, "w500")
+
+                    # Use TMDb posters if available, otherwise fall back to RSS-parsed ones
+                    catalog_poster_url = tmdb_poster_thumbnail_url or catalog_poster_from_rss
+                    meta_poster_url = tmdb_poster_medium_url or meta_poster_from_rss
+
+                    # If all poster attempts fail, use a generic placeholder
+                    if not catalog_poster_url:
+                        catalog_poster_url = "https://placehold.co/185x278/000000/FFFFFF?text=No+Poster"
+                        logger.warning(f"Using generic placeholder for catalog poster for '{title}'.")
                     if not meta_poster_url:
-                         logger.debug(f"Final check: No primary poster found for '{title}'. Catalog Poster: '{catalog_poster_url}', Meta Poster: '{meta_poster_url}'")
+                        meta_poster_url = "https://placehold.co/500x750/000000/FFFFFF?text=No+Poster"
+                        logger.warning(f"Using generic placeholder for meta poster for '{title}'.")
 
 
                     magnet_link_tag = soup_desc.find('a', class_='magnet-plugin', href=re.compile(r'magnet:\?xt=urn:btih:'))
@@ -898,9 +972,10 @@ def update_rss_feed_and_catalog():
                 })
             
             # Update posters if they were missing before, or if a better one appears (simple check)
-            if not existing_catalog_item.get('poster_thumbnail') and poster_thumbnail:
+            # Prioritize existing TMDb posters if present
+            if not (existing_catalog_item.get('poster_thumbnail') and "image.tmdb.org" in existing_catalog_item['poster_thumbnail']) and poster_thumbnail:
                  redis_client.set_catalog_item(base_stremio_id, {'poster_thumbnail': poster_thumbnail})
-            if not existing_catalog_item.get('poster_medium') and poster_medium:
+            if not (existing_catalog_item.get('poster_medium') and "image.tmdb.org" in existing_catalog_item['poster_medium']) and poster_medium:
                  redis_client.set_catalog_item(base_stremio_id, {'poster_medium': poster_medium})
 
 
@@ -978,8 +1053,11 @@ if __name__ == '__main__':
 
     # Initialize Managers
     domain_resolver = DomainResolver(MASTER_DOMAIN, redis_client)
+    # Initialize TmdbManager (ensure TMDB_API_KEY is available in .env)
+    tmdb_manager = TmdbManager(TMDB_API_KEY)
     tracker_manager = TrackerManager(TRACKERS_URL)
-    rss_parser = RSSParser(domain_resolver) 
+    # Pass tmdb_manager to RSS Parser
+    rss_parser = RSSParser(domain_resolver, tmdb_manager) 
 
     # Perform initial setup tasks immediately on startup
     logger.info("Performing initial setup tasks...")
