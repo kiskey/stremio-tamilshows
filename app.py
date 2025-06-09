@@ -412,7 +412,7 @@ class TrackerManager:
             params = [] # No existing parameters
 
         # Append new trackers
-        for tracker in best_trackers:
+        for tracker in best_trackers: # Corrected from best_best_trackers
             params.append(f"tr={tracker}")
         
         return f"{base_magnet}?{'&'.join(params)}" if params else base_magnet
@@ -941,6 +941,7 @@ def meta(type, id):
 
 
             embedded_stremio_streams.append({
+                # "id": info_hash, # Removed as per user's observation that stream endpoint uses catalog ID
                 "name": stream_name, 
                 "description": stream_title, 
                 "infoHash": info_hash,
@@ -967,69 +968,80 @@ def meta(type, id):
         return jsonify({"meta": None})
 
 
-@app.route('/stream/<type>/<infoHash>.json')
-def stream(type, infoHash):
+@app.route('/stream/<type>/<id>.json') # Changed from <infoHash> to <id> (catalog ID)
+def stream(type, id):
     """
-    Returns stream data for a given infoHash.
+    Returns stream data for a given catalog ID.
+    This endpoint will return all streams associated with the requested catalog ID.
     """
     if type != "movie": # Our addon currently only handles 'movie' type
-        return jsonify({"stream": None})
+        logger.warning(f"Unsupported type '{type}' for stream request.")
+        return jsonify({"streams": []}) # Return empty list for unsupported types
 
-    found_stream = redis_client.get_stream_by_info_hash(infoHash)
+    item = redis_client.get_catalog_item(id) # ID here is the base_stremio_id (catalog ID)
     
-    if found_stream:
-        magnet_uri = found_stream.get('magnet_uri')
-        if not magnet_uri:
-            logger.warning(f"Found stream data for infoHash '{infoHash}' but no magnet_uri. Cannot create stream object.")
-            return jsonify({"stream": None})
-
-        # Append trackers to the magnet URI
-        final_magnet_uri = tracker_manager.append_trackers_to_magnet(magnet_uri)
+    if item:
+        streams_data = redis_client.get_streams_for_item(id)
         
-        tracker_urls_matches = re.findall(r'tr=([^&]+)', final_magnet_uri)
-        stremio_sources = [f"tracker:{url}" for url in tracker_urls_matches]
-        stremio_sources.append(f"dht:{infoHash}") # Use the infoHash from the request directly
+        # Sort streams by quality (highest to lowest)
+        quality_order = {'4K': 5, '2160P': 4, '1080P': 3, '720P': 2, '480P': 1, 'STANDARD QUALITY': 0}
+        streams_data.sort(key=lambda x: quality_order.get(re.search(r'(\d+P|4K|STANDARD QUALITY)', x['quality'].upper())[0] if re.search(r'(\d+P|4K|STANDARD QUALITY)', x['quality'].upper()) else '', 0), reverse=True)
 
-        # Get item name from catalog to use in stream title/description
-        base_stremio_id = found_stream.get('base_stremio_id')
-        item_title = 'N/A'
-        if base_stremio_id:
-            item = redis_client.get_catalog_item(base_stremio_id)
-            if item:
-                item_title = item.get('title', 'N/A')
+        response_streams = []
+
+        for s_data in streams_data:
+            magnet_uri = s_data.get('magnet_uri')
+            if not magnet_uri:
+                logger.warning(f"No magnet URI found for stream data for catalog ID '{id}'. Skipping stream entry.")
+                continue
+
+            info_hash_match = re.search(r'btih:([^&]+)', magnet_uri)
+            info_hash = info_hash_match.group(1) if info_hash_match else None
+
+            if not info_hash:
+                logger.warning(f"Could not extract infoHash for stream for catalog ID '{id}' with magnet URI: {magnet_uri}")
+                continue
+
+            # Append trackers to the magnet URI
+            final_magnet_uri = tracker_manager.append_trackers_to_magnet(magnet_uri)
+            
+            tracker_urls_matches = re.findall(r'tr=([^&]+)', final_magnet_uri)
+            stremio_sources = [f"tracker:{url}" for url in tracker_urls_matches]
+            stremio_sources.append(f"dht:{info_hash}")
+
+            quality_for_name = s_data.get('quality') # Use the stored concise quality
+            audio_languages = json.loads(s_data.get('audio_languages', '[]'))
+            video_codec = s_data.get('video_codec', '')
+            file_size = s_data.get('file_size', '')
+
+            # --- Constructing stream.name and stream.title for *individual stream* ---
+            stream_name_parts = ["TamilBlasters"]
+            if quality_for_name and quality_for_name != "Standard Quality":
+                stream_name_parts.append(quality_for_name)
+            stream_name = " - ".join(stream_name_parts)
+
+            stream_title_parts = [item.get('title', 'N/A')] # Base title from catalog item
+            if audio_languages:
+                stream_title_parts.append(f"[{', '.join(audio_languages)}]")
+            if video_codec:
+                stream_title_parts.append(video_codec)
+            if file_size:
+                stream_title_parts.append(file_size)
+            stream_title = " | ".join(filter(None, stream_title_parts))
+
+            response_streams.append({
+                "name": stream_name,
+                "description": stream_title,
+                "infoHash": info_hash, # Use the extracted infoHash
+                "sources": stremio_sources,
+                "title": stream_title
+            })
         
-        quality_for_name = found_stream.get('quality') # Use the stored concise quality
-        audio_languages = json.loads(found_stream.get('audio_languages', '[]'))
-        video_codec = found_stream.get('video_codec', '')
-        file_size = found_stream.get('file_size', '')
-
-        # --- Constructing stream.name and stream.title for *individual stream* ---
-        stream_name_parts = ["TamilBlasters"]
-        if quality_for_name and quality_for_name != "Standard Quality":
-            stream_name_parts.append(quality_for_name)
-        stream_name = " - ".join(stream_name_parts)
-
-        stream_title_parts = [item_title]
-        if audio_languages:
-            stream_title_parts.append(f"[{', '.join(audio_languages)}]")
-        if video_codec:
-            stream_title_parts.append(video_codec)
-        if file_size:
-            stream_title_parts.append(file_size)
-        stream_title = " | ".join(filter(None, stream_title_parts))
-
-        stream_obj = {
-            "name": stream_name,
-            "description": stream_title,
-            "infoHash": infoHash, # Use the infoHash from the request
-            "sources": stremio_sources,
-            "title": stream_title
-        }
-        logger.debug(f"Returning stream for infoHash '{infoHash}': {json.dumps(stream_obj, indent=2)}")
-        return jsonify({"stream": stream_obj})
+        logger.debug(f"Returning {len(response_streams)} streams for catalog ID '{id}'.")
+        return jsonify({"streams": response_streams})
     else:
-        logger.warning(f"Stream not found for infoHash: {infoHash}")
-        return jsonify({"stream": None})
+        logger.warning(f"Catalog item not found for ID: {id}. Cannot retrieve streams.")
+        return jsonify({"streams": []}) # Return empty list if item not found
 
 
 # --- Scheduled Tasks ---
