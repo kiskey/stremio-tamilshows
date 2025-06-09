@@ -442,6 +442,7 @@ class RSSParser:
                     if torrent_link_tag and torrent_link_tag.string:
                         torrent_filename_text = torrent_link_tag.string.strip()
                         # Extract the bracketed part from the torrent filename (e.g., "[720p HDRip -[Tamil + ...]]")
+                        # This regex now correctly captures the part *before* the .torrent extension
                         quality_match_from_filename = re.search(r'\[([^\]]+?)(?:\s*-\s*ESubs?)?\](?=.*\.torrent)', torrent_filename_text, re.IGNORECASE)
                         if quality_match_from_filename:
                             # Keep the brackets for consistency in quality_details_raw
@@ -461,8 +462,9 @@ class RSSParser:
 
 
                     # --- Continue title parsing ---
+                    # Use the title parts from the original title_full split, but cleaned.
                     if len(title_parts_split_by_last_bracket) > 1:
-                        title_candidate = title_parts_split_by_last_last_bracket[0].strip()
+                        title_candidate = title_parts_split_by_last_bracket[0].strip()
                         title_candidate = re.sub(r'[-\s]+$', '', title_candidate).strip() # Remove trailing hyphens/spaces
                     else:
                         title_candidate = cleaned_title_full.strip() # Use the fully cleaned title if no brackets
@@ -598,7 +600,7 @@ class RSSParser:
                     # This will use the most specific image as the primary poster candidate
                     img_candidates = soup.select('img[data-src]')
                     for img_tag in img_candidates:
-                        if not is_undesirable_image(img_tag):
+                        if not is_undesirable_image(img_tag): # Check if it's not a bad image
                             poster_url = img_tag['data-src']
                             logger.debug(f"Selected poster URL (data-src, desirable): {poster_url}")
                             break
@@ -607,7 +609,7 @@ class RSSParser:
                     if not poster_url:
                         img_candidates_src = soup.select('img[src]')
                         for img_tag in img_candidates_src:
-                            if not is_undesirable_image(img_tag):
+                            if not is_undesirable_image(img_tag): # Check if it's not a bad image
                                 poster_url = img_tag['src']
                                 logger.debug(f"Selected poster URL (src, desirable): {poster_url}")
                                 break
