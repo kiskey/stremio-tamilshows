@@ -639,6 +639,10 @@ def stream(type, stremio_id):
             # Format trackers for Stremio's 'sources' field (tracker:URL or dht:NODE_ID)
             stremio_sources = [f"tracker:{url}" for url in tracker_urls_matches]
             
+            # *** ADD DHT SOURCE HERE ***
+            if info_hash:
+                stremio_sources.append(f"dht:{info_hash}")
+
             if info_hash: # Only add stream if we successfully got an infoHash
                 # --- Constructing stream.title with emojis ---
                 title_parts = []
@@ -660,7 +664,7 @@ def stream(type, stremio_id):
                     "name": f"TamilBlasters-{quality_for_name}", # Concise quality for stream name
                     "description": f"Source: 1TamilBlasters - {description_quality}", # Full details for description
                     "infoHash": info_hash,
-                    "sources": stremio_sources, # This now contains only formatted tracker URLs
+                    "sources": stremio_sources, # This now contains both tracker and DHT sources
                     "title": final_stream_title # Title including concise quality and emoji metadata
                 }
                 stremio_streams.append(stremio_stream)
