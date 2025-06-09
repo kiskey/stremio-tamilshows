@@ -513,68 +513,80 @@ class RSSParser:
 
 
                     # --- REFINED Logic for parsing concise title and year for catalog display ---
-                    working_title_for_base = entry.title
-                    
+                    raw_entry_title = entry.title
+                    working_title_for_base = raw_entry_title # Start with a working copy
+
                     # 1. Extract year from anywhere in the title, and then remove it to simplify
                     year_match = re.search(r"\b\((\d{4})\)\b", working_title_for_base) 
                     if year_match:
                         year = year_match.group(1)
-                        # Remove the year and its parentheses from the working title
-                        working_title_for_base = working_title_for_base.replace(year_match.group(0), '').strip()
+                        # Replace the year and its parentheses with a space to help subsequent cleaning
+                        working_title_for_base = working_title_for_base.replace(year_match.group(0), ' ').strip()
                     
-                    # 2. Remove season and episode information - MORE ROBUST PATTERNS
+                    # 2. Remove specific season and episode indicators FIRST, as they are very structured
                     season_episode_patterns = [
-                        r'\bS\d+E\d+(?:-\d+)?\b',           # S01E01, S01E01-10
-                        r'\bS\d+\b',                        # S01
-                        r'\bEP\s*\(\d+(?:-\d+)?\)\b',       # EP(01-10) - specifically for your example
-                        r'\bE(?:pisode)?\s*\d+(?:-\d+)?\b', # E01, Episode 01-06
-                        r'\bSeason\s+\d+\b',                # Season 1
-                        r'\bPart\s+\d+\b',                  # Part 1
-                        r'\bVol(?:\.|ume)?\s+\d+\b',        # Vol. 1, Volume 2
-                        r'\b\d+\s*Episodes?\b',             # 10 Episodes
-                        r'\bComplete\s*Season\b',           # Complete Season
-                        r'\bCollection\b'                   # Collection (can imply multiple parts/seasons)
+                        r'\bS(?:eason)?\s*\d+\s*E(?:pisode)?\s*\d+(?:-\d+)?\b', # S01E01, Season 1 Episode 1
+                        r'\bS(?:eason)?\s*\d+\b',                             # S01, Season 1
+                        r'\bEP\s*\(\d+(?:-\d+)?\)\b',                         # EP(01-10)
+                        r'\bE(?:pisode)?\s*\d+(?:-\d+)?\b',                   # E01, Episode 01-06
+                        r'\bPart\s+\d+\b',                                    # Part 1
+                        r'\bVol(?:\.|ume)?\s+\d+\b',                          # Vol. 1, Volume 2
+                        r'\b\d+\s*Episodes?\b',                               # 10 Episodes
+                        r'\bComplete\s*Season(?:s)?\b',                       # Complete Season, Complete Seasons
+                        r'\bCollection(?:\s+\d+)?\b',                         # Collection, Collection 1
+                        r'\b(?:Mini[\-.\s]?)Series\b',                        # Mini-Series
                     ]
                     for pattern in season_episode_patterns:
-                        working_title_for_base = re.sub(pattern, '', working_title_for_base, flags=re.IGNORECASE).strip()
+                        working_title_for_base = re.sub(pattern, ' ', working_title_for_base, flags=re.IGNORECASE).strip()
 
-                    # 3. Aggressively remove common quality/codec/size patterns in brackets or at the end
-                    quality_pattern_in_brackets = r'\[\s*(?:(?:[A-Za-z0-9\s\+\-\.:\/]*?)(?:\d+p|4K|GB|MB|x\d+|DD\d+\.\d+|AC3|AAC|HDRip|WEB-DL|BluRay|BDRip|DVDRip|WebRip|AVC|HEVC|VP9|AV1|Dual Audio|Multi Audio|Org Audio|ESubs?)\s*[A-Za-z0-9\s\+\-\.:\/]*?)\s*\]'
-                    working_title_for_base = re.sub(quality_pattern_in_brackets, '', working_title_for_base, flags=re.IGNORECASE).strip()
+                    # 3. Remove ANY content inside square brackets, as it's almost always metadata after title
+                    # This is aggressive but necessary for varied RSS formats
+                    working_title_for_base = re.sub(r'\[.*?\]', ' ', working_title_for_base).strip()
                     
-                    quality_pattern_at_end = r'\s*-\s*(?:\d+p|4K|GB|MB|x\d+|DD\d+\.\d+|AC3|AAC|HDRip|WEB-DL|BluRay|BDRip|DVDRip|WebRip|AVC|HEVC|VP9|AV1|ESubs?).*$'
-                    working_title_for_base = re.sub(quality_pattern_at_end, '', working_title_for_base, flags=re.IGNORECASE).strip()
+                    # 4. Remove common quality/codec/size terms that might appear without brackets or at the end
+                    general_quality_terms = [
+                        r'\b(?:4K|2160p|1080p|720p|480p)\b',
+                        r'\b(?:HDRip|WEB-DL|BluRay|BDRip|DVDRip|WebRip)\b',
+                        r'\b(?:x264|H\.264|H\.265|HEVC|AVC|VP9|AV1)\b',
+                        r'\b(?:DD\d+\.\d+|AC3|AAC|DTS|FLAC|MP3)\b',
+                        r'\b\d+(?:\.\d+)?(?:GB|MB|KB)\b', # File size
+                        r'\b(?:Dual Audio|Multi Audio|Org Audio|ESubs?)\b',
+                        r'\bUntouched\b', # Specific term found in example
+                        r'\bHQ\b' # "HQ HDRip" from example
+                    ]
+                    for term in general_quality_terms:
+                        working_title_for_base = re.sub(term, ' ', working_title_for_base, flags=re.IGNORECASE).strip()
 
-                    # 4. Remove any remaining trailing hyphens, dots, or spaces, and leading/trailing brackets
-                    working_title_for_base = re.sub(r'[.\-_\s]+$', '', working_title_for_base).strip()
-                    working_title_for_base = re.sub(r'^\s*\[|\]\s*$', '', working_title_for_base).strip()
+                    # 5. Remove any leftover website indicators or release group names
+                    release_group_patterns = [
+                        r'\s*-\s*(?:ETRG|EVO|RARBG|YTS|FxM|CM|TamilRockers|TamilBlasters)\b.*$',
+                        r'^\s*www\.\w+\.[\w/]+\s*-\s*', # leading website indicators
+                        r'\s*\b(?:DDP5\.1)\b', # Another release group related term from example
+                    ]
+                    for pattern in release_group_patterns:
+                        working_title_for_base = re.sub(pattern, ' ', working_title_for_base, flags=re.IGNORECASE).strip()
                     
-                    # Remove any leftover website indicators or release group names that might be at the beginning/end
-                    working_title_for_base = re.sub(r'^\s*www\.\w+\.[\w/]+\s*-\s*', '', working_title_for_base, flags=re.IGNORECASE).strip()
-                    # More cautious release group removal - targeting common patterns
-                    working_title_for_base = re.sub(r'\s*-\s*(?:ETRG|EVO|RARBG|YTS|FxM|CM|TamilRockers|TamilBlasters)\b.*$', '', working_title_for_base, flags=re.IGNORECASE).strip()
+                    # 6. Final cleanup of punctuation, multiple spaces, and trailing characters
+                    working_title_for_base = re.sub(r'[_\-.]+', ' ', working_title_for_base).strip() # Replace underscores, dashes, dots with spaces
+                    working_title_for_base = re.sub(r'[^a-zA-Z0-9\s]+', ' ', working_title_for_base).strip() # Remove all non-alphanumeric except spaces
+                    title = re.sub(r'\s+', ' ', working_title_for_base).strip() # Consolidate multiple spaces
                     
-                    # Ensure no multiple spaces
-                    title = re.sub(r'\s+', ' ', working_title_for_base).strip()
                     # Fallback if after all cleaning, the title is empty
                     title = title or raw_entry_title.split('[')[0].strip() or "Unknown Title"
 
-                    # Re-extract year if it was not found earlier but is still in the clean title (e.g., "Movie Title 2023")
-                    # And remove it from title string to avoid passing it to TMDb query
-                    if not year:
-                        temp_year_match = re.search(r'\b(\d{4})\b', title)
-                        if temp_year_match:
-                            year = temp_year_match.group(1)
-                            # Remove year from title if found and remove it from title string
-                            title = title.replace(temp_year_match.group(0), '').strip()
-                            title = re.sub(r'[.\-_\s]+$', '', title).strip() # clean trailing chars again
+                    # Final check: if year was still in title, remove it
+                    # This handles cases like "Movie Title 2023" where year might not be in parentheses initially.
+                    if year and year in title:
+                        title = title.replace(year, '').strip()
+                        title = re.sub(r'\s+', ' ', title).strip() # Clean up spaces after year removal
 
                     # Generate `base_stremio_id` using the now-clean title and year
                     base_stremio_id = f"tamilshows:{re.sub(r'[^a-zA-Z0-9]', '', title).lower()}{year or ''}"
                     if not base_stremio_id or "unknowntitle" in base_stremio_id.lower(): 
                         base_stremio_id = f"tamilshows:unknown_item_{int(time.time() * 1000)}_{os.urandom(4).hex()}" 
 
-                    # --- REFINED quality_details_raw extraction from description_html ---
+                    # --- REFINED quality_details_raw extraction from description_html (uses title_full) ---
+                    # This section still uses the original, full title to extract detailed quality for stream display
                     soup_desc = BeautifulSoup(description_html, 'html.parser')
                     
                     torrent_link_tag = soup_desc.find('a', class_='ipsAttachLink', attrs={'data-fileext': 'torrent'})
