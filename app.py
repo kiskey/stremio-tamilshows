@@ -605,18 +605,31 @@ class RSSParser:
 
             for entry in feed.entries:
                 description_html = entry.description
+                if not description_html:
+                    logger.warning(f"RSS entry '{entry.get('title', 'N/A')}' has empty description HTML. Skipping torrent link parsing.")
+                    continue
+                
                 soup_desc = BeautifulSoup(description_html, 'html.parser')
 
-                # Find all torrent links within the entry's description
-                torrent_links = soup_desc.find_all('a', class_='ipsAttachLink', attrs={'data-fileext': 'torrent'})
-
+                # Find all potential torrent links within the entry's description
+                # First, find all anchor tags with the 'ipsAttachLink' class
+                potential_torrent_links = soup_desc.find_all('a', class_='ipsAttachLink')
+                
+                torrent_links = []
+                for link_tag in potential_torrent_links:
+                    # Check if 'data-fileext' attribute exists and is 'torrent'
+                    if link_tag.has_attr('data-fileext') and link_tag['data-fileext'] == 'torrent':
+                        torrent_links.append(link_tag)
+                
                 if not torrent_links:
-                    logger.warning(f"No torrent links found in RSS entry: {entry.get('title', 'N/A')}. Skipping.")
+                    logger.warning(f"No torrent file links found in RSS entry: {entry.get('title', 'N/A')}. Skipping.")
                     continue
+
+                # Find all magnet links once for this entry to associate with torrent files later
+                all_magnet_links_in_desc = soup_desc.find_all('a', class_='magnet-plugin', href=re.compile(r'magnet:\?xt=urn:btih:'))
 
                 for torrent_link_tag in torrent_links:
                     # Initialize variables for this specific torrent link to prevent NameError
-                    # These will be populated by _parse_torrent_filename or other logic
                     title = "Unknown Title"
                     year = ""
                     base_stremio_id = ""
@@ -634,13 +647,34 @@ class RSSParser:
                         torrent_filename_text = torrent_link_tag.string.strip()
                         original_link = torrent_link_tag.get('href', '')
 
-                        # Find the immediately following magnet link for this torrent file
-                        # This assumes magnet links are usually right after the torrent file link in the HTML
-                        magnet_link_tag = torrent_link_tag.find_next_sibling('a', class_='magnet-plugin', href=re.compile(r'magnet:\?xt=urn:btih:'))
-                        if magnet_link_tag:
-                            magnet_uri = magnet_link_tag.get('href', '')
-                        else:
-                            logger.warning(f"No magnet link found for torrent '{torrent_filename_text}'. Skipping this stream.")
+                        # --- Robust Magnet Link Association ---
+                        # Attempt to find a magnet link whose 'dn' parameter matches the torrent filename
+                        found_magnet = False
+                        # Clean torrent filename for better matching with magnet URI's dn parameter
+                        cleaned_torrent_filename_for_magnet_match = torrent_filename_text.replace("www.1TamilBlasters", "").replace(".fi", "").replace(".re", "").replace(".earth", "").replace(".torrent", "").strip()
+                        cleaned_torrent_filename_for_magnet_match = re.sub(r'[_\-.]+', ' ', cleaned_torrent_filename_for_magnet_match).strip().lower()
+
+
+                        for m_link_tag in all_magnet_links_in_desc:
+                            m_href = m_link_tag.get('href', '')
+                            dn_match = re.search(r'&dn=([^&]+)', m_href)
+                            if dn_match:
+                                # URL decode and replace '+' with space for comparison
+                                dn_decoded = requests.utils.unquote_plus(dn_match.group(1)).replace("+", " ").strip().lower()
+                                
+                                # Check if the torrent filename (or a substantial part of it) is in the magnet's display name
+                                if cleaned_torrent_filename_for_magnet_match in dn_decoded:
+                                    magnet_uri = m_href
+                                    found_magnet = True
+                                    break
+                                # Fallback: check if the original torrent filename (without .torrent) is in magnet's display name
+                                elif torrent_filename_text.lower().replace(".torrent", "") in dn_decoded:
+                                    magnet_uri = m_href
+                                    found_magnet = True
+                                    break
+                        
+                        if not found_magnet:
+                            logger.warning(f"No corresponding magnet link found for torrent '{torrent_filename_text}'. Skipping this stream.")
                             continue # Skip this specific stream if no magnet link
 
                         # Parse pubDate from the main entry, as it's common for all qualities/files
