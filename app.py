@@ -73,7 +73,8 @@ class RedisManager:
         """Stores a catalog item in Redis."""
         try:
             sanitized_data = self._sanitize_data(data)
-            self.client.hmset(f"catalog:{stremio_id}", sanitized_data)
+            # Use hset with mapping instead of hmset
+            self.client.hset(f"catalog:{stremio_id}", mapping=sanitized_data)
             logger.info(f"Catalog item '{stremio_id}' stored/updated.")
         except Exception as e:
             logger.error(f"Error storing catalog item '{stremio_id}': {e}. Data: {data}")
@@ -665,27 +666,41 @@ class RSSParser:
                         # --- Robust Magnet Link Association ---
                         found_magnet = False
                         
-                        # Prepare the torrent_filename_text for comparison with magnet's DN
-                        # Remove '.torrent' extension and normalize spaces
-                        normalized_torrent_filename_base = re.sub(r'\.torrent$', '', torrent_filename_text, flags=re.IGNORECASE)
-                        normalized_torrent_filename_base = re.sub(r'[_\-.]+', ' ', normalized_torrent_filename_base).strip().lower()
+                        # Helper for aggressive normalization
+                        def aggressively_normalize(text):
+                            # Remove common website prefixes
+                            text = re.sub(r'^(?:www\.\w+\.[\w/]+\s*-\s*)', '', text, flags=re.IGNORECASE)
+                            # Replace various separators and dots (excluding actual file extensions initially) with single spaces
+                            text = re.sub(r'[_\-.]+', ' ', text)
+                            # Remove common file extensions
+                            text = re.sub(r'\.(torrent|mkv|mp4|avi|webm)$', '', text, flags=re.IGNORECASE)
+                            # Remove any lingering file extensions that might be missed or other non-alphanumeric except spaces
+                            text = re.sub(r'[^a-zA-Z0-9\s]+', ' ', text)
+                            # Consolidate multiple spaces and convert to lowercase
+                            text = re.sub(r'\s+', ' ', text).strip().lower()
+                            return text
+
+                        # Prepare the torrent_filename_text for comparison
+                        cleaned_torrent_name_for_comparison = aggressively_normalize(torrent_filename_text)
 
                         for m_link_tag in all_magnet_links_in_desc:
                             m_href = m_link_tag.get('href', '')
                             dn_match = re.search(r'&dn=([^&]+)', m_href)
                             if dn_match:
-                                # URL decode, replace '+' with space, remove '.torrent' and normalize spaces
-                                dn_decoded_normalized = unquote_plus(dn_match.group(1)).replace("+", " ").strip().lower()
-                                dn_decoded_normalized_base = re.sub(r'\.torrent$', '', dn_decoded_normalized, flags=re.IGNORECASE)
-                                dn_decoded_normalized_base = re.sub(r'[_\-.]+', ' ', dn_decoded_normalized_base).strip()
+                                # Prepare the magnet DN for comparison
+                                temp_magnet_dn = unquote_plus(dn_match.group(1)).replace("+", " ").strip()
+                                cleaned_magnet_dn_for_comparison = aggressively_normalize(temp_magnet_dn)
                                 
-                                # Check if the normalized torrent filename is a substring of the normalized magnet DN
-                                # or vice versa, for better flexibility.
-                                if normalized_torrent_filename_base in dn_decoded_normalized_base or \
-                                   dn_decoded_normalized_base in normalized_torrent_filename_base:
+                                logger.debug(f"Comparing torrent_name: '{cleaned_torrent_name_for_comparison}' with magnet_dn: '{cleaned_magnet_dn_for_comparison}'")
+
+                                # Step 3: Compare cleaned strings
+                                # Use exact match OR one being a significant substring of the other
+                                if cleaned_torrent_name_for_comparison == cleaned_magnet_dn_for_comparison or \
+                                   (len(cleaned_torrent_name_for_comparison) > 10 and cleaned_torrent_name_for_comparison in cleaned_magnet_dn_for_comparison) or \
+                                   (len(cleaned_magnet_dn_for_comparison) > 10 and cleaned_magnet_dn_for_comparison in cleaned_torrent_name_for_comparison):
                                     magnet_uri = m_href
                                     found_magnet = True
-                                    logger.debug(f"Magnet found for '{torrent_filename_text}' with DN '{dn_decoded_normalized_base}'")
+                                    logger.debug(f"Magnet found for '{torrent_filename_text}' with DN '{dn_match.group(1)}'") # Log original DN
                                     break
                         
                         if not found_magnet:
@@ -1097,7 +1112,7 @@ def stream(type, id):
                 stream_title_parts.append(video_codec)
             if file_size:
                 stream_title_parts.append(file_size)
-            stream_title = " | ".join(filter(None, stream_title_parts))
+            stream_title = " | ".ーん(filter(None, stream_title_parts))
 
             response_streams.append({
                 "name": stream_name,
