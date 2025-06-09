@@ -606,23 +606,30 @@ class RSSParser:
             for entry in feed.entries:
                 description_html = entry.description
                 if not description_html:
-                    logger.warning(f"RSS entry '{entry.get('title', 'N/A')}' has empty description HTML. Skipping torrent link parsing.")
+                    logger.warning(f"RSS entry '{entry.get('title', 'N/A')}' has empty description HTML. Skipping torrent link parsing for this entry.")
                     continue
                 
-                soup_desc = BeautifulSoup(description_html, 'html.parser')
+                soup_desc = None
+                try:
+                    soup_desc = BeautifulSoup(description_html, 'html.parser')
+                except Exception as bs_e:
+                    logger.error(f"Error parsing HTML description for entry '{entry.get('title', 'N/A')}': {bs_e}. Raw description (first 500 chars): {description_html[:500]}...")
+                    continue # Skip this entry if description HTML is unparseable
 
                 # Find all potential torrent links within the entry's description
-                # First, find all anchor tags with the 'ipsAttachLink' class
-                potential_torrent_links = soup_desc.find_all('a', class_='ipsAttachLink')
+                # Explicitly search for 'a' tags with class 'ipsAttachLink' AND data-fileext='torrent'
+                torrent_links = soup_desc.find_all('a', class_='ipsAttachLink', attrs={'data-fileext': 'torrent'})
                 
-                torrent_links = []
-                for link_tag in potential_torrent_links:
-                    # Check if 'data-fileext' attribute exists and is 'torrent'
-                    if link_tag.has_attr('data-fileext') and link_tag['data-fileext'] == 'torrent':
-                        torrent_links.append(link_tag)
-                
+                # Log detailed info if no torrent links are found for this entry
                 if not torrent_links:
-                    logger.warning(f"No torrent file links found in RSS entry: {entry.get('title', 'N/A')}. Skipping.")
+                    potential_links_raw = soup_desc.find_all('a', class_='ipsAttachLink')
+                    logger.debug(f"Found {len(potential_links_raw)} ipsAttachLink tags for entry '{entry.get('title', 'N/A')}'.")
+                    for link_tag in potential_links_raw:
+                        # Log why a potential link was skipped if it doesn't have the correct data-fileext
+                        if not (link_tag.has_attr('data-fileext') and link_tag['data-fileext'] == 'torrent'):
+                            logger.debug(f"Skipping ipsAttachLink tag for entry '{entry.get('title', 'N/A')}' because data-fileext is not 'torrent' or missing. Tag: {link_tag.prettify(formatter=None)}")
+
+                    logger.warning(f"No torrent file links with data-fileext='torrent' found in RSS entry: {entry.get('title', 'N/A')}. Complete description (first 1000 chars): {description_html[:1000]}")
                     continue
 
                 # Find all magnet links once for this entry to associate with torrent files later
@@ -685,12 +692,16 @@ class RSSParser:
                             try:
                                 pub_date_dt = datetime.strptime(pub_date_str, '%a, %d %b %Y %H:%M:%S %Z')
                             except ValueError:
+                                # If all strptime attempts fail, use entry.published_parsed as a fallback or current time
                                 if entry.published_parsed:
                                     try:
+                                        # Convert time.struct_time to datetime object
                                         pub_date_dt = datetime.fromtimestamp(time.mktime(entry.published_parsed))
                                     except Exception:
+                                        logger.warning(f"Could not convert parsed_tuple to datetime for '{entry.get('title', 'N/A')}'. Using current time.")
                                         pub_date_dt = datetime.now()
                                 else:
+                                    logger.warning(f"No reliable pubDate found for '{entry.get('title', 'N/A')}'. Using current time.")
                                     pub_date_dt = datetime.now()
 
                         # Use the new helper function to parse details from the torrent filename
