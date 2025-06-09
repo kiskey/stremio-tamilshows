@@ -443,26 +443,35 @@ class RSSParser:
                     soup = BeautifulSoup(description_html, 'html.parser')
                     poster_url = ""
                     
-                    # Prioritize finding img tags with 'data-src' that are not 'spacer.png'
-                    # Look for img within an 'a' tag that has a 'data-src' and not a spacer
+                    # Strategy 1: Look for img within an 'a' tag with rel="external nofollow" and data-src
                     main_poster_anchor = soup.find('a', attrs={'rel': 'external nofollow'})
                     if main_poster_anchor:
-                        img_tag_in_anchor = main_poster_anchor.find('img', attrs={'data-src': True})
-                        if img_tag_in_anchor:
-                            temp_url = img_tag_in_anchor.get('data-src')
+                        img_tag = main_poster_anchor.find('img', attrs={'data-src': True})
+                        if img_tag:
+                            temp_url = img_tag.get('data-src')
                             if temp_url and "spacer.png" not in temp_url:
                                 poster_url = temp_url
-                                logger.debug(f"Poster found via rel='external nofollow' anchor: {poster_url}")
+                                logger.debug(f"Poster found (Strategy 1 - data-src in external nofollow anchor): {poster_url}")
 
-                    # Fallback: if not found, look for any img with data-src directly
+                    # Strategy 2: Fallback to any img tag with data-src, excluding spacer.png
                     if not poster_url:
                         all_data_src_images = soup.find_all('img', attrs={'data-src': True})
                         for img_tag in all_data_src_images:
                             temp_url = img_tag.get('data-src')
                             if temp_url and "spacer.png" not in temp_url:
                                 poster_url = temp_url
-                                logger.debug(f"Poster found via direct img[data-src]: {poster_url}")
-                                break # Take the first valid one
+                                logger.debug(f"Poster found (Strategy 2 - direct img[data-src]): {poster_url}")
+                                break # Take the first valid one found
+
+                    # Strategy 3: Final fallback to any img tag with src, excluding spacer.png
+                    if not poster_url:
+                        all_src_images = soup.find_all('img', attrs={'src': True})
+                        for img_tag in all_src_images:
+                            temp_url = img_tag.get('src')
+                            if temp_url and "spacer.png" not in temp_url:
+                                poster_url = temp_url
+                                logger.debug(f"Poster found (Strategy 3 - direct img[src]): {poster_url}")
+                                break # Take the first valid one found
 
                     poster_url = poster_url or "" # Ensure it's an empty string if nothing valid found
                     if not poster_url:
@@ -536,10 +545,10 @@ def manifest():
             "catalog",
             "stream"
         ],
-        "types": ["series"], # Assuming 'series' for TV shows/web series
+        "types": ["movie"], # Changed to 'movie'
         "catalogs": [
             {
-                "type": "series",
+                "type": "movie", # Changed to 'movie'
                 "id": "tamil_shows_catalog",
                 "name": "Tamil Shows",
                 "extraRequired": [],
@@ -563,7 +572,7 @@ def catalog(type, id, extra=None):
     Returns the catalog of Tamil shows.
     Stremio expects 'meta' objects for each item.
     """
-    if type != "series" or id != "tamil_shows_catalog":
+    if type != "movie" or id != "tamil_shows_catalog": # Changed to 'movie'
         return jsonify({"metas": []})
 
     all_items = redis_client.get_all_catalog_items()
@@ -571,50 +580,17 @@ def catalog(type, id, extra=None):
 
     for item in all_items:
         if 'title' in item and 'poster' in item:
-            # Extract season and episode from title_base if present, for Stremio's video object
-            # Example title: "Hai Junoon Dream Dare Dominate S01 EP(01-20)"
-            season_num = 1 # Default season if not found
-            episode_num = 1 # Default episode if not found
-            
-            # Try to find SXXEP(YY-ZZ) format
-            episode_info_match = re.search(r'S(\d+)\s*EP\((\d+)-(\d+)\)', item['title'], re.IGNORECASE)
-            if episode_info_match:
-                season_num = int(episode_info_match.group(1))
-                episode_num = int(episode_info_match.group(2)) # Use the first episode number for the video object
-            else:
-                # Try to find SXXEYY format
-                single_episode_match = re.search(r'S(\d+)E(\d+)', item['title'], re.IGNORECASE)
-                if single_episode_match:
-                    season_num = int(single_episode_match.group(1))
-                    episode_num = int(single_episode_match.group(2))
-                else:
-                    # Fallback to just SXX
-                    single_season_match = re.search(r'S(\d+)', item['title'], re.IGNORECASE)
-                    if single_season_match:
-                        season_num = int(single_season_match.group(1))
-
-
-            # Create a single video entry for this "season pack" or "episode"
-            # The video.id must be unique across all videos and is what Stremio will use to request streams
-            video_entry = {
-                "id": item['id'], # This is the unique ID for the stream request
-                "title": item['title'], # The full title of the episode/season pack
-                "released": item.get('pub_date', '').split('T')[0] if item.get('pub_date') else '', # Stremio expects 'YYYY-MM-DD'
-                "season": season_num,
-                "episode": episode_num
-            }
-
             meta = {
-                "id": item['id'], # This is the unique ID for the series itself
-                "type": "series",
-                "name": item['title'], # The full name of the series (e.g., "Hai Junoon Dream Dare Dominate S01 EP(01-20)")
+                "id": item['id'], # This is the unique ID for the item
+                "type": "movie", # Changed to 'movie'
+                "name": item['title'], # The full name of the item
                 "poster": item['poster'],
                 "posterShape": "regular",
                 "description": item.get('quality_details', 'No description available.'),
                 "releaseInfo": item.get('year', ''),
-                "genres": ["Tamil Shows", "Web Series"],
-                "runtime": "",
-                "videos": [video_entry] # Add the video array here
+                "genres": ["Tamil Shows", "Web Series"], # Still relevant genres
+                "runtime": ""
+                # Removed 'videos' array as it's not needed for 'movie' type
             }
             metas.append(meta)
     
@@ -630,7 +606,7 @@ def stream(type, stremio_id):
     """
     Returns stream links for a given Stremio ID.
     """
-    if type != "series": # Ensure type matches what we provide in catalog
+    if type != "movie": # Changed to 'movie'
         return jsonify({"streams": []})
 
     streams_data = redis_client.get_streams_for_item(stremio_id)
