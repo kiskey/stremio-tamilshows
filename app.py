@@ -12,6 +12,7 @@ import requests
 import feedparser
 from bs4 import BeautifulSoup
 import redis
+from urllib.parse import unquote_plus # Import unquote_plus from urllib.parse
 
 # --- Configuration from Environment Variables ---
 # Initial RSS Feed URL - This will be updated dynamically
@@ -669,7 +670,7 @@ class RSSParser:
                             dn_match = re.search(r'&dn=([^&]+)', m_href)
                             if dn_match:
                                 # URL decode and replace '+' with space for comparison
-                                dn_decoded = requests.utils.unquote_plus(dn_match.group(1)).replace("+", " ").strip().lower()
+                                dn_decoded = unquote_plus(dn_match.group(1)).replace("+", " ").strip().lower()
                                 
                                 # Check if the torrent filename (or a substantial part of it) is in the magnet's display name
                                 if cleaned_torrent_filename_for_magnet_match in dn_decoded:
