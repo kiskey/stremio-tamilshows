@@ -360,20 +360,23 @@ class RSSParser:
                     title_base = "" # Will store the clean title part
                     year = ""
                     quality_details_raw = "" # Will store the full content of the last bracket
+                    audio_languages = []
+                    video_codec = ""
+                    file_size = ""
 
-                    # 1. Extract the LAST bracketed content as raw quality string
-                    # This regex is more permissive, allowing anything inside the last brackets
-                    quality_raw_match = re.search(r"\[([^\[\]]*?(?:\[.*?\][^\[\]]*?)*)\]\s*$", title_full)
-                    # The regex above tries to handle nested brackets to some extent, but can be complex.
-                    # A simpler, and often effective, approach for the *last* bracket:
-                    if quality_raw_match:
-                        quality_details_raw = quality_raw_match.group(1).strip()
-                        # Remove the quality part from the full title for further parsing
-                        processed_title_for_year = title_full[:quality_raw_match.start()].strip()
+
+                    # --- Logic for parsing title and quality ---
+                    last_open_bracket_idx = title_full.rfind('[')
+                    last_close_bracket_idx = title_full.rfind(']')
+
+                    if last_open_bracket_idx != -1 and last_close_bracket_idx != -1 and last_close_bracket_idx > last_open_bracket_idx:
+                        quality_details_raw = title_full[last_open_bracket_idx + 1:last_close_bracket_idx].strip()
+                        processed_title_for_year = title_full[:last_open_bracket_idx].strip()
                     else:
-                        processed_title_for_year = title_full.strip() # No quality brackets found
+                        quality_details_raw = ""
+                        processed_title_for_year = title_full.strip()
 
-                    # 2. Extract year (if present) from the remaining title string
+                    # Extract year (if present) from the remaining title string
                     year_match = re.search(r"\((\d{4})\)", processed_title_for_year)
                     if year_match:
                         year = year_match.group(1)
@@ -390,80 +393,72 @@ class RSSParser:
                     quality_details_raw = quality_details_raw or ""
 
                     # Refine quality_details for Stremio's 'name' and 'description'
-                    # For 'name', we want a concise quality, e.g., "1080p HD"
-                    # For 'description', we can use the full raw string.
-                    
-                    # Try to extract common quality markers like '1080p', '720p', 'HD', 'HDRip', '4K'
                     concise_quality_elements = []
-                    # Example of quality_details_raw: "1080p HD AVC - x264 - [Tam + Mal + Tel + Hin + Kan] - AAC - 16.5GB - ESub"
                     
-                    # Extract resolutions (4K, 1080p, 720p, 480p)
+                    # --- Extract specific details from quality_details_raw ---
+                    
+                    # Resolutions (4K, 1080p, 720p, 480p)
                     resolution_match = re.search(r'(\d+p|4K)', quality_details_raw, re.IGNORECASE)
                     if resolution_match:
                         concise_quality_elements.append(resolution_match.group(1).upper())
                     
-                    # Extract general quality terms (HD, HDRip)
+                    # General quality terms (HD, HDRip)
                     if re.search(r'HDRip', quality_details_raw, re.IGNORECASE):
                         concise_quality_elements.append('HDRip')
-                    elif re.search(r'HD', quality_details_raw, re.IGNORECASE) and 'HDRip' not in concise_quality_elements:
+                    elif re.search(r'HD', quality_details_raw, re.IGNORECASE):
                         concise_quality_elements.append('HD')
                     
-                    # Extract specific codecs (e.g., x264, H.264, H.265, HEVC)
-                    codec_match = re.search(r'(x264|H\.264|H\.265|HEVC)', quality_details_raw, re.IGNORECASE)
-                    if codec_match:
-                        concise_quality_elements.append(codec_match.group(1).upper())
-
-                    # Extract audio codecs (e.g., DD5.1, AAC)
-                    audio_match = re.search(r'(DD\d\.\d|AAC)', quality_details_raw, re.IGNORECASE)
-                    if audio_match:
-                        concise_quality_elements.append(audio_match.group(1).upper())
-
-                    # Extract language (e.g., [Tam + Hin + Eng])
-                    language_match = re.search(r'\[(.*?\])', quality_details_raw)
-                    if language_match:
-                        concise_quality_elements.append(language_match.group(1).replace('[','').replace(']','')) # Clean up brackets
-
-                    # Remove duplicates and join
-                    extracted_quality_for_name = " ".join(sorted(list(set(concise_quality_elements)), 
-                                                            key=lambda x: (
-                                                                not any(res in x.lower() for res in ['4k', 'p']), # Prioritize resolution
-                                                                not ('hdrip' in x.lower() or 'hd' in x.lower()), # Then HD
-                                                                x # Alphabetical
-                                                            )))
-                    if not extracted_quality_for_name and quality_details_raw:
-                        extracted_quality_for_name = quality_details_raw.split('-')[0].strip() # Fallback to first part if structured
-                    if not extracted_quality_for_name:
-                        extracted_quality_for_name = "Unknown" # Final fallback
-
-                    description_quality = quality_details_raw if quality_details_raw else "No quality details available."
-
-
-                    # Parse description for poster and magnet link
-                    soup = BeautifulSoup(description_html, 'html.parser')
+                    # Video Codec (x264, H.264, H.265, HEVC)
+                    video_codec_match = re.search(r'(x264|H\.264|H\.265|HEVC)', quality_details_raw, re.IGNORECASE)
+                    if video_codec_match:
+                        video_codec = video_codec_match.group(1).upper()
                     
+                    # Audio Languages (e.g., [Tam + Mal + Tel + Hin + Kan])
+                    language_match = re.search(r'\[([^\]]+)\]', quality_details_raw)
+                    if language_match:
+                        languages_str = language_match.group(1).strip()
+                        audio_languages = [lang.strip() for lang in re.split(r'\s*\+\s*', languages_str)]
+                    
+                    # File Size (e.g., 16.5GB, 800MB)
+                    size_match = re.search(r'(\d+(\.\d+)?(GB|MB))', quality_details_raw, re.IGNORECASE)
+                    if size_match:
+                        file_size = size_match.group(1).upper()
+
+                    extracted_quality_for_name = " ".join(concise_quality_elements)
+                    if not extracted_quality_for_name and quality_details_raw:
+                        extracted_quality_for_name = quality_details_raw.split('-')[0].strip()
+                    if not extracted_quality_for_name:
+                        extracted_quality_for_name = "Unknown"
+
+
+                    description_quality = quality_details_raw if quality_details_raw else "No description available."
+
+                    # --- Logic for parsing poster URL ---
+                    soup = BeautifulSoup(description_html, 'html.parser')
                     poster_url = ""
-                    # Strategy 1: Look for img inside an 'a' tag with rel="external nofollow" and data-src
-                    a_tag_with_img = soup.find('a', attrs={'rel': 'external nofollow'})
+                    
+                    # Prioritize finding img tags with 'data-src' that are not 'spacer.png'
+                    # Look for img within an 'a' tag that has a 'data-src' and not a spacer
+                    a_tag_with_img = soup.find('a', href=True)
                     if a_tag_with_img:
                         potential_poster_img = a_tag_with_img.find('img', attrs={'data-src': True})
                         if potential_poster_img:
-                            poster_url = potential_poster_img.get('data-src')
-
-                    # Strategy 2: Fallback to any img with class 'ipsImage' prioritizing data-src, excluding spacer.png
-                    if not poster_url:
-                        all_ips_images = soup.find_all('img', class_='ipsImage')
-                        for img_tag in all_ips_images:
-                            temp_url = img_tag.get('data-src') or img_tag.get('src')
+                            temp_url = potential_poster_img.get('data-src')
                             if temp_url and "spacer.png" not in temp_url:
                                 poster_url = temp_url
-                                break # Found a non-spacer, take it
+
+                    # Fallback: if no poster found by the above, look for any img with data-src
+                    if not poster_url:
+                        all_data_src_images = soup.find_all('img', attrs={'data-src': True})
+                        for img_tag in all_data_src_images:
+                            temp_url = img_tag.get('data-src')
+                            if temp_url and "spacer.png" not in temp_url:
+                                poster_url = temp_url
+                                break 
 
                     poster_url = poster_url or "" # Ensure it's an empty string if nothing found
-                    if "spacer.png" in poster_url: # Final check to ensure no spacer
-                        poster_url = ""
-
                     if not poster_url:
-                         logger.debug(f"Poster not found for '{title}' or it's a spacer. Poster URL: '{poster_url}'")
+                        logger.debug(f"Poster not found or it's a spacer for '{title}'. Poster URL: '{poster_url}'")
 
 
                     magnet_link_tag = soup.find('a', class_='magnet-plugin', href=re.compile(r'magnet:\?xt=urn:btih:'))
@@ -490,6 +485,7 @@ class RSSParser:
                     # Add debug log for parsed information
                     logger.debug(f"Parsed Item: ID='{stremio_id}', Title='{title}', Year='{year}', "
                                  f"Quality_Concise='{extracted_quality_for_name}', Quality_Full='{description_quality}', "
+                                 f"Audio_Languages='{audio_languages}', Video_Codec='{video_codec}', File_Size='{file_size}', "
                                  f"Poster='{poster_url}', Magnet='{magnet_uri}'")
 
 
@@ -500,6 +496,9 @@ class RSSParser:
                             'year': year,
                             'quality_details': description_quality, # Full details for description
                             'quality_for_name': extracted_quality_for_name, # Concise for stream name
+                            'audio_languages': json.dumps(audio_languages), # Store as JSON string
+                            'video_codec': video_codec,
+                            'file_size': file_size,
                             'poster': poster_url,
                             'magnet_uri': magnet_uri,
                             'pub_date': pub_date_dt, # Store as datetime object temporarily for sorting, convert to string for Redis
@@ -599,10 +598,14 @@ def stream(type, stremio_id):
     for s_data in streams_data:
         magnet_uri = s_data.get('magnet_uri')
         
-        # Use the concise quality for the stream name
-        quality_for_name = s_data.get('quality') or "Unknown Quality" 
-        # Use the full quality details for the stream description
+        # Retrieve parsed quality details from Redis
+        quality_for_name = s_data.get('quality_for_name') or "Unknown Quality" 
         description_quality = s_data.get('quality_details') or "No description available."
+        
+        # Parse stored JSON strings back to Python objects
+        audio_languages = json.loads(s_data.get('audio_languages', '[]'))
+        video_codec = s_data.get('video_codec', '')
+        file_size = s_data.get('file_size', '')
         
         if magnet_uri:
             # Append best trackers to the magnet URI
@@ -619,13 +622,28 @@ def stream(type, stremio_id):
             stremio_sources = [f"tracker:{url}" for url in tracker_urls_matches]
             
             if info_hash: # Only add stream if we successfully got an infoHash
+                # --- Constructing stream.title with emojis ---
+                title_parts = []
+                if audio_languages:
+                    title_parts.append(f"🔊 {', '.join(audio_languages)}")
+                if video_codec:
+                    title_parts.append(f"📺 {video_codec}")
+                if file_size:
+                    title_parts.append(f"📦 {file_size}")
+                
+                # Combine original title with new metadata parts
+                stream_title_metadata = " | ".join(title_parts)
+                final_stream_title = f"{s_data.get('title', 'N/A')} ({quality_for_name})"
+                if stream_title_metadata:
+                    final_stream_title += f" - {stream_title_metadata}"
+
+
                 stremio_stream = {
-                    "name": quality_for_name, # Concise quality for stream name
+                    "name": f"TamilBlasters-{quality_for_name}", # Concise quality for stream name
                     "description": f"Source: 1TamilBlasters - {description_quality}", # Full details for description
                     "infoHash": info_hash,
                     "sources": stremio_sources, # This now contains only formatted tracker URLs
-                    # Removed "url" field as it's for direct video URLs, not magnet links.
-                    "title": f"{s_data.get('title', 'N/A')} ({quality_for_name})" # Title including concise quality
+                    "title": final_stream_title # Title including concise quality and emoji metadata
                 }
                 stremio_streams.append(stremio_stream)
                 logger.debug(f"Returning stream object for '{stremio_id}': {json.dumps(stremio_stream, indent=2)}")
@@ -637,7 +655,7 @@ def stream(type, stremio_id):
     # Sort streams by quality (e.g., 1080p before 720p)
     # This assumes quality strings are consistently parseable (e.g., '1080p', '720p', etc.)
     quality_order = {'4K': 5, '2160P': 4, '1080P': 3, '720P': 2, '480P': 1} # Adjusted order for '4K'
-    stremio_streams.sort(key=lambda x: quality_order.get(re.search(r'(\d+P|4K)', x['name'].upper()), 0), reverse=True)
+    stremio_streams.sort(key=lambda x: quality_order.get(re.search(r'(\d+P|4K)', x['name'].upper())[0] if re.search(r'(\d+P|4K)', x['name'].upper()) else '', 0), reverse=True)
 
 
     return jsonify({"streams": stremio_streams})
@@ -662,6 +680,9 @@ def update_rss_feed_and_catalog():
         title = item['title']
         quality_full_details = item['quality_details'] # Full string from brackets
         quality_concise_name = item['quality_for_name'] # Parsed for display
+        audio_languages = item['audio_languages']
+        video_codec = item['video_codec']
+        file_size = item['file_size']
         magnet_uri = item['magnet_uri']
         poster = item['poster']
         year = item['year']
@@ -690,6 +711,9 @@ def update_rss_feed_and_catalog():
                     'title': title,
                     'quality': quality_concise_name, # Store concise quality for lookup
                     'quality_details': quality_full_details, # Store full details for stream description
+                    'audio_languages': audio_languages,
+                    'video_codec': video_codec,
+                    'file_size': file_size,
                     'magnet_uri': magnet_uri,
                     'pub_date': pub_date.isoformat() if pub_date else datetime.now().isoformat()
                 }
@@ -707,6 +731,9 @@ def update_rss_feed_and_catalog():
                 'title': title,
                 'quality': quality_concise_name, # Store concise quality for lookup
                 'quality_details': quality_full_details, # Store full details for stream description
+                'audio_languages': audio_languages,
+                'video_codec': video_codec,
+                'file_size': file_size,
                 'magnet_uri': magnet_uri,
                 'pub_date': pub_date.isoformat() if pub_date else datetime.now().isoformat()
             }
@@ -796,4 +823,3 @@ if __name__ == '__main__':
         scheduler.shutdown()
     except Exception as e:
         logger.error(f"Error during scheduler shutdown: {e}")
-
