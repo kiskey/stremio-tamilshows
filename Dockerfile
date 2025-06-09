@@ -37,7 +37,8 @@ WORKDIR /app
 # Copy the installed Python packages from the builder stage
 # This is crucial for a thin image as it avoids copying build tools.
 COPY --from=builder /usr/local/lib/python3.9/site-packages /usr/local/lib/python3.9/site-packages
-COPY --from=builder /usr/local/bin /usr/local/bin # Copy executables from site-packages (if any)
+# Copy executables from site-packages (if any)
+COPY --from=builder /usr/local/bin /usr/local/bin
 
 # Copy the application code into the final image
 COPY . .
