@@ -81,7 +81,7 @@ class RedisManager:
         try:
             item = self.client.hgetall(f"catalog:{stremio_id}")
             if item:
-                item['id'] = stremio_id # Add stremio_id to the item data (FIX)
+                item['id'] = stremio_id # Add stremio_id to the item data
             return item if item else None
         except Exception as e:
             logger.error(f"Error retrieving catalog item '{stremio_id}': {e}")
@@ -646,7 +646,7 @@ def catalog(type, id, extra=None):
                 "type": "movie", 
                 "name": item['title'], 
                 "poster": item['poster'],
-                "posterShape": "regular",
+                "posterShape": "poster", # Changed from "regular" to "poster"
                 "description": item.get('quality_details', 'No description available.'),
                 "releaseInfo": item.get('year', ''),
                 "genres": ["Tamil Shows", "Web Series"], 
@@ -655,7 +655,7 @@ def catalog(type, id, extra=None):
             metas.append(meta)
     
     # Sort by publication date (most recent first)
-    metas.sort(key=lambda x: x.get('pub_date', '0000-01-01T00:00:00:00Z'), reverse=True) # Ensure pub_date is always string for comparison
+    metas.sort(key=lambda x: x.get('pub_date', '0000-01-01T00:00:00Z'), reverse=True)
 
     logger.debug(f"Returning catalog with {len(metas)} items. Example meta: {json.dumps(metas[0] if metas else {}, indent=2)}")
     return jsonify({"metas": metas})
@@ -673,18 +673,70 @@ def meta(type, id):
     item = redis_client.get_catalog_item(id) # ID here is the stremio_id
 
     if item:
+        # Generate stream objects to embed directly
+        streams_data = redis_client.get_streams_for_item(id)
+        embedded_stremio_streams = []
+
+        for s_data in streams_data:
+            magnet_uri = s_data.get('magnet_uri')
+            if not magnet_uri:
+                logger.warning(f"No magnet URI found for stream '{id}'. Skipping stream entry in meta.")
+                continue
+
+            quality_for_name = s_data.get('quality_for_name') 
+            description_quality = s_data.get('quality_details') or "No description available."
+            audio_languages = json.loads(s_data.get('audio_languages', '[]'))
+            video_codec = s_data.get('video_codec', '')
+            file_size = s_data.get('file_size', '')
+            
+            final_magnet_uri = tracker_manager.append_trackers_to_magnet(magnet_uri)
+            info_hash_match = re.search(r'btih:([^&]+)', final_magnet_uri)
+            info_hash = info_hash_match.group(1) if info_hash_match else None
+
+            if not info_hash:
+                logger.warning(f"Could not extract infoHash for stream '{id}' with magnet URI: {magnet_uri}")
+                continue
+            
+            tracker_urls_matches = re.findall(r'tr=([^&]+)', final_magnet_uri)
+            stremio_sources = [f"tracker:{url}" for url in tracker_urls_matches]
+            stremio_sources.append(f"dht:{info_hash}")
+
+            # --- Constructing stream.name and stream.title ---
+            stream_name_parts = ["TamilBlasters"]
+            if quality_for_name and quality_for_name != "Unknown Quality":
+                stream_name_parts.append(quality_for_name)
+            stream_name = " ".join(stream_name_parts)
+
+            stream_title_parts = [s_data.get('title', 'N/A')]
+            if audio_languages:
+                stream_title_parts.append(f"({', '.join(audio_languages)})")
+            if video_codec:
+                stream_title_parts.append(video_codec)
+            if file_size:
+                stream_title_parts.append(file_size)
+            stream_title = " ".join(stream_title_parts)
+
+            embedded_stremio_streams.append({
+                "name": stream_name, 
+                "description": f"Source: 1TamilBlasters - {description_quality}", 
+                "infoHash": info_hash,
+                "sources": stremio_sources, 
+                "title": stream_title
+            })
+
         meta_obj = {
             "id": item['id'],
             "type": "movie",
             "name": item['title'],
             "poster": item['poster'],
-            "posterShape": "regular",
+            "posterShape": "poster", # Changed from "regular" to "poster"
             "description": item.get('quality_details', 'No description available.'),
             "releaseInfo": item.get('year', ''),
             "genres": ["Tamil Shows", "Web Series"],
-            "runtime": ""
+            "runtime": "",
+            "streams": embedded_stremio_streams # Streams are now embedded here
         }
-        logger.debug(f"Returning meta for '{id}': {json.dumps(meta_obj, indent=2)}")
+        logger.debug(f"Returning meta with embedded streams for '{id}': {json.dumps(meta_obj, indent=2)}")
         return jsonify({"meta": meta_obj})
     else:
         logger.warning(f"Metadata not found for ID: {id}")
@@ -695,6 +747,8 @@ def meta(type, id):
 def stream(type, stremio_id):
     """
     Returns stream links for a given Stremio ID.
+    This endpoint is still implemented as per Stremio SDK recommendations,
+    even though streams are now primarily embedded in the /meta response.
     """
     if type != "movie": 
         return jsonify({"streams": []})
@@ -733,13 +787,9 @@ def stream(type, stremio_id):
                 stremio_sources.append(f"dht:{info_hash}")
 
             if info_hash: # Only add stream if we successfully got an infoHash
-                # --- Constructing stream.title and stream.name more clearly ---
-                # name: Concise display in stream list (e.g., "TamilBlasters 1080p")
-                # title: More detailed info shown below the name
-                # description: Full raw quality string or extended details
-                
+                # --- Constructing stream.name and stream.title ---
                 stream_name_parts = ["TamilBlasters"]
-                if quality_for_name and quality_for_name != "Unknown Quality": # Check against the string literal
+                if quality_for_name and quality_for_name != "Unknown Quality":
                     stream_name_parts.append(quality_for_name)
                 stream_name = " ".join(stream_name_parts)
 
@@ -750,10 +800,7 @@ def stream(type, stremio_id):
                     stream_title_parts.append(video_codec)
                 if file_size:
                     stream_title_parts.append(file_size)
-                
-                # Removed emojis from title for compatibility, moved to description
                 stream_title = " ".join(stream_title_parts)
-
 
                 stremio_stream = {
                     "name": stream_name, 
