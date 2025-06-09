@@ -91,10 +91,7 @@ class RedisManager:
     def add_stream_to_item(self, stremio_id, stream_data):
         """Adds a stream (or updates) for a catalog item in Redis."""
         try:
-            # Store streams as a JSON string in a separate key
-            # This allows multiple streams per item
             key = f"streams:{stremio_id}"
-            # Fetch existing streams, append new, store back
             existing_streams_json = self.client.get(key)
             existing_streams = json.loads(existing_streams_json) if existing_streams_json else []
 
@@ -111,7 +108,17 @@ class RedisManager:
                 existing_streams.append(sanitized_stream_data)
 
             self.client.set(key, json.dumps(existing_streams))
-            logger.info(f"Stream for item '{stremio_id}' added/updated.")
+            logger.info(f"Stream list for item '{stremio_id}' added/updated.")
+
+            # NEW: Also store stream directly by infoHash for quick lookup
+            info_hash = sanitized_stream_data.get('infoHash')
+            if info_hash:
+                # Store the full stream data including base_stremio_id for meta lookup later
+                stream_data_for_hash = sanitized_stream_data.copy()
+                stream_data_for_hash['base_stremio_id'] = stremio_id
+                self.client.set(f"stream_by_hash:{info_hash}", json.dumps(stream_data_for_hash))
+                logger.debug(f"Stream '{info_hash}' also stored by hash.")
+
         except Exception as e:
             logger.error(f"Error adding stream for item '{stremio_id}': {e}. Stream data: {stream_data}")
 
@@ -123,6 +130,15 @@ class RedisManager:
         except Exception as e:
             logger.error(f"Error retrieving streams for item '{stremio_id}': {e}")
             return []
+
+    def get_stream_by_info_hash(self, info_hash):
+        """Retrieves a single stream by its infoHash."""
+        try:
+            stream_json = self.client.get(f"stream_by_hash:{info_hash}")
+            return json.loads(stream_json) if stream_json else None
+        except Exception as e:
+            logger.error(f"Error retrieving stream by infoHash '{info_hash}': {e}")
+            return None
 
     def get_all_catalog_items(self):
         """Retrieves all catalog items stored in Redis."""
@@ -143,82 +159,34 @@ class RedisManager:
     def delete_item(self, stremio_id):
         """Deletes a catalog item and its associated streams from Redis."""
         try:
+            # Get all streams associated with this stremio_id
+            streams_to_delete = self.get_streams_for_item(stremio_id)
+
             self.client.delete(f"catalog:{stremio_id}")
             self.client.delete(f"streams:{stremio_id}")
-            logger.info(f"Deleted catalog item and streams for '{stremio_id}'.")
+            logger.info(f"Deleted catalog item and streams list for '{stremio_id}'.")
+
+            # NEW: Also delete individual streams by infoHash
+            for s_data in streams_to_delete:
+                info_hash = s_data.get('infoHash')
+                if info_hash:
+                    self.client.delete(f"stream_by_hash:{info_hash}")
+                    logger.debug(f"Deleted individual stream by hash '{info_hash}'.")
+
         except Exception as e:
             logger.error(f"Error deleting item '{stremio_id}': {e}")
-
-    def update_poster_domains(self, old_domain, new_domain):
-        """
-        Updates poster URLs for all catalog items in Redis if their domain matches old_domain.
-        Handles both 'poster_thumbnail' and 'poster_medium' fields.
-        This is for RSS-parsed posters, but kept for compatibility.
-        """
-        try:
-            keys = self.client.keys("catalog:*")
-            updated_count = 0
-            for key in keys:
-                item_data = self.client.hgetall(key)
-                
-                # Check and update poster_thumbnail (only if it's not a TMDb poster)
-                if 'poster_thumbnail' in item_data and old_domain in item_data['poster_thumbnail'] and "image.tmdb.org" not in item_data['poster_thumbnail']:
-                    new_poster_url = item_data['poster_thumbnail'].replace(old_domain, new_domain)
-                    self.client.hset(key, 'poster_thumbnail', new_poster_url)
-                    updated_count += 1
-                    logger.info(f"Updated thumbnail poster domain for {item_data.get('id', 'N/A')}: {item_data['poster_thumbnail']} -> {new_poster_url}")
-                
-                # Check and update poster_medium (only if it's not a TMDb poster)
-                if 'poster_medium' in item_data and old_domain in item_data['poster_medium'] and "image.tmdb.org" not in item_data['poster_medium']:
-                    new_poster_url = item_data['poster_medium'].replace(old_domain, new_domain)
-                    self.client.hset(key, 'poster_medium', new_poster_url)
-                    updated_count += 1
-                    logger.info(f"Updated medium poster domain for {item_data.get('id', 'N/A')}: {item_data['poster_medium']} -> {new_poster_url}")
-            
-            if updated_count > 0:
-                logger.info(f"Updated domains for {updated_count} poster URLs from '{old_domain}' to '{new_domain}'.")
-            else:
-                logger.info(f"No non-TMDb poster URLs found to update for domain '{old_domain}'.")
-
-        except Exception as e:
-            logger.error(f"Error updating poster domains in Redis: {e}")
-
-    def delete_older_entries(self, year_threshold):
-        """
-        Deletes catalog items older than the specified year_threshold.
-        e.g., if year_threshold is 2, it deletes items older than (current_year - 2).
-        """
-        try:
-            current_year = datetime.now().year
-            threshold_year = current_year - year_threshold
-            keys = self.client.keys("catalog:*")
-            deleted_count = 0
-            for key in keys:
-                item_data = self.client.hgetall(key)
-                if item_data and 'year' in item_data:
-                    try:
-                        item_year = int(item_data['year'])
-                        if item_year < threshold_year:
-                            stremio_id = key.replace("catalog:", "")
-                            self.delete_item(stremio_id)
-                            deleted_count += 1
-                    except ValueError:
-                        logger.warning(f"Could not parse year for item {key}: {item_data['year']}")
-            logger.info(f"Cleaned up {deleted_count} entries older than {threshold_year}.")
-        except Exception as e:
-            logger.error(f"Error during old entry cleanup: {e}")
 
     def clear_app_data(self):
         """Clears only the data inserted by this application from the Redis database."""
         try:
-            # Get all keys that start with "catalog:" or "streams:"
+            # Get all keys that start with "catalog:", "streams:", or "stream_by_hash:"
             catalog_keys = self.client.keys("catalog:*")
-            stream_keys = self.client.keys("streams:*")
-            
-            all_app_keys = list(set(catalog_keys + stream_keys)) # Use set to avoid duplicates
+            stream_list_keys = self.client.keys("streams:*")
+            stream_hash_keys = self.client.keys("stream_by_hash:*") # NEW
+
+            all_app_keys = list(set(catalog_keys + stream_list_keys + stream_hash_keys)) # Use set to avoid duplicates
 
             if all_app_keys:
-                # Delete all identified keys in one go
                 self.client.delete(*all_app_keys)
                 logger.info(f"Successfully cleared {len(all_app_keys)} application-specific keys from Redis database.")
             else:
@@ -997,6 +965,71 @@ def meta(type, id):
     else:
         logger.warning(f"Metadata not found for ID: {id}")
         return jsonify({"meta": None})
+
+
+@app.route('/stream/<type>/<infoHash>.json')
+def stream(type, infoHash):
+    """
+    Returns stream data for a given infoHash.
+    """
+    if type != "movie": # Our addon currently only handles 'movie' type
+        return jsonify({"stream": None})
+
+    found_stream = redis_client.get_stream_by_info_hash(infoHash)
+    
+    if found_stream:
+        magnet_uri = found_stream.get('magnet_uri')
+        if not magnet_uri:
+            logger.warning(f"Found stream data for infoHash '{infoHash}' but no magnet_uri. Cannot create stream object.")
+            return jsonify({"stream": None})
+
+        # Append trackers to the magnet URI
+        final_magnet_uri = tracker_manager.append_trackers_to_magnet(magnet_uri)
+        
+        tracker_urls_matches = re.findall(r'tr=([^&]+)', final_magnet_uri)
+        stremio_sources = [f"tracker:{url}" for url in tracker_urls_matches]
+        stremio_sources.append(f"dht:{infoHash}") # Use the infoHash from the request directly
+
+        # Get item name from catalog to use in stream title/description
+        base_stremio_id = found_stream.get('base_stremio_id')
+        item_title = 'N/A'
+        if base_stremio_id:
+            item = redis_client.get_catalog_item(base_stremio_id)
+            if item:
+                item_title = item.get('title', 'N/A')
+        
+        quality_for_name = found_stream.get('quality') # Use the stored concise quality
+        audio_languages = json.loads(found_stream.get('audio_languages', '[]'))
+        video_codec = found_stream.get('video_codec', '')
+        file_size = found_stream.get('file_size', '')
+
+        # --- Constructing stream.name and stream.title for *individual stream* ---
+        stream_name_parts = ["TamilBlasters"]
+        if quality_for_name and quality_for_name != "Standard Quality":
+            stream_name_parts.append(quality_for_name)
+        stream_name = " - ".join(stream_name_parts)
+
+        stream_title_parts = [item_title]
+        if audio_languages:
+            stream_title_parts.append(f"[{', '.join(audio_languages)}]")
+        if video_codec:
+            stream_title_parts.append(video_codec)
+        if file_size:
+            stream_title_parts.append(file_size)
+        stream_title = " | ".join(filter(None, stream_title_parts))
+
+        stream_obj = {
+            "name": stream_name,
+            "description": stream_title,
+            "infoHash": infoHash, # Use the infoHash from the request
+            "sources": stremio_sources,
+            "title": stream_title
+        }
+        logger.debug(f"Returning stream for infoHash '{infoHash}': {json.dumps(stream_obj, indent=2)}")
+        return jsonify({"stream": stream_obj})
+    else:
+        logger.warning(f"Stream not found for infoHash: {infoHash}")
+        return jsonify({"stream": None})
 
 
 # --- Scheduled Tasks ---
