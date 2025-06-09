@@ -431,37 +431,36 @@ class RSSParser:
                     pub_date_dt = datetime.now() # Initialize with current datetime as a fallback
 
                     # Initialize other variables
-                    title_base = "" 
                     year = ""
                     quality_details_raw = "" 
                     audio_languages = []
                     video_codec = ""
                     file_size = ""
 
-                    # --- Logic for parsing title and year ---
-                    # Clean title_full first: remove common suffixes and redundant spaces/hyphens
-                    cleaned_title_full = title_full.replace(" - ESub", "").replace(" -ESubs", "").strip()
-                    cleaned_title_full = re.sub(r'^\s*\[|\]\s*$', '', cleaned_title_full).strip() # Remove leading/trailing brackets
-                    cleaned_title_full = re.sub(r'[-\s]+$', '', cleaned_title_full).strip() # Remove trailing hyphens/spaces
+                    # --- REFINED Logic for parsing concise title and year for catalog display ---
+                    # The full title from RSS entry
+                    raw_entry_title = entry.title
+                    
+                    # Remove common suffixes like " - ESub" or " -ESubs" from the end of the full title
+                    # This temp_title will be the base for our concise catalog title
+                    temp_catalog_title = re.sub(r'\s*-\s*ESubs?$', '', raw_entry_title, flags=re.IGNORECASE).strip()
 
-                    # Extract year (if present) from anywhere in the title
-                    year_match = re.search(r"\((\d{4})\)", cleaned_title_full)
+                    # Extract year from the end (e.g., "(2025)")
+                    year_match = re.search(r'\((\d{4})\)$', temp_catalog_title)
                     if year_match:
                         year = year_match.group(1)
-                        # Remove the year and its parentheses from the title to get clean title_base
-                        title_base = cleaned_title_full.replace(year_match.group(0), '').strip()
+                        # Remove the year from the title for final catalog display title
+                        temp_catalog_title = temp_catalog_title[:year_match.start()].strip()
                     else:
                         year = ""
-                        title_base = cleaned_title_full.strip()
-
-                    # Clean up title_base from potential trailing "S01 EP(01-12)" or similar
-                    episode_info_match = re.search(r'(S\d+E\d+|S\d+\s*EP\(\d+-\d+\)|Season \d+ Episode \d+)', title_base, re.IGNORECASE)
-                    if episode_info_match:
-                        title_base = title_base[:episode_info_match.start()].strip()
-                    title = re.sub(r'[:\s-]+$', '', title_base).strip() # Remove any remaining trailing colons, spaces, hyphens
-                    if title.endswith(' -'): # handle cases like "Movie Name -"
-                        title = title[:-2].strip()
                     
+                    # Remove any trailing hyphens, spaces, or leading/trailing brackets that are left
+                    temp_catalog_title = re.sub(r'[-\s]+$', '', temp_catalog_title).strip()
+                    temp_catalog_title = re.sub(r'^\s*\[|\]\s*$', '', temp_catalog_title).strip()
+
+                    # This `title` will now be the concise title for catalog display
+                    title = temp_catalog_title or "" # Ensure it's never None
+
                     # --- REFINED quality_details_raw extraction from description_html ---
                     soup_desc = BeautifulSoup(description_html, 'html.parser')
                     
@@ -548,7 +547,6 @@ class RSSParser:
                     description_quality = quality_details_raw if quality_details_raw else "No additional quality details available."
 
                     # Ensure all extracted values are strings
-                    title = title or ""
                     year = year or ""
                     quality_details_raw = quality_details_raw or "" # Ensure it's string, not None
                     video_codec = video_codec or ""
@@ -666,7 +664,7 @@ class RSSParser:
                     if title and magnet_uri:
                         items_data.append({
                             'stremio_id': stremio_id,
-                            'title': title,
+                            'title': title, # This is now the concise title for catalog
                             'year': year,
                             'quality_details': quality_details_raw, # Store the cleaned raw details
                             'quality_for_name': extracted_quality_for_name, # Concise for stream name
@@ -747,7 +745,7 @@ def catalog(type, id, extra=None):
             meta = {
                 "id": item['id'], 
                 "type": "movie", 
-                "name": item['title'], 
+                "name": item['title'], # Use the concise title here
                 "poster": item['poster_thumbnail'], # Use thumbnail for catalog
                 "posterShape": "poster", 
                 "description": item.get('quality_details', 'No description available.'),
@@ -810,7 +808,7 @@ def meta(type, id):
                 stream_name_parts.append(quality_for_name)
             stream_name = " - ".join(stream_name_parts)
 
-            stream_title_parts = [item.get('title', 'N/A')]
+            stream_title_parts = [item.get('title', 'N/A')] # Use the concise title from the item
             if audio_languages:
                 stream_title_parts.append(f"{', '.join(audio_languages)}")
             if video_codec:
@@ -830,7 +828,7 @@ def meta(type, id):
         meta_obj = {
             "id": item['id'],
             "type": "movie",
-            "name": item['title'], # Use the cleaned title from the item
+            "name": item['title'], # Use the concise title from the item
             "poster": item['poster_medium'], # Use medium size for meta
             "posterShape": "poster", 
             "description": item.get('quality_details', 'No description available.'), # Use the cleaned raw details here
@@ -891,7 +889,7 @@ def stream(type, stremio_id):
 
             # Use the original title from the item in Redis
             item_data = redis_client.get_catalog_item(stremio_id)
-            original_title = item_data.get('title', 'N/A') if item_data else 'N/A'
+            original_title = item_data.get('title', 'N/A') if item_data else 'N/A' # Use the concise title
 
             stream_title_parts = [original_title] 
             if audio_languages:
@@ -938,7 +936,7 @@ def update_rss_feed_and_catalog():
 
     for item in items:
         stremio_id = item['stremio_id']
-        title = item['title']
+        title = item['title'] # This is now the concise title
         quality_full_details = item['quality_details'] # Full string from brackets
         quality_concise_name = item['quality_for_name'] # Parsed for display
         audio_languages = item['audio_languages']
@@ -953,8 +951,8 @@ def update_rss_feed_and_catalog():
 
         # Prepare item data for catalog (ensure values are strings)
         catalog_data = {
-            'title': title,
-            'year': item['year'], # Use item['year'] directly
+            'title': title, # Store the concise title here
+            'year': item['year'],
             'poster_thumbnail': poster_thumbnail, # Store thumbnail for catalog
             'poster_medium': poster_medium,       # Store medium for meta
             'quality_details': quality_full_details,
@@ -970,7 +968,7 @@ def update_rss_feed_and_catalog():
             if not stream_exists:
                 # Add new stream for existing content
                 stream_data = {
-                    'title': title,
+                    'title': title, # Store the concise title for the stream as well
                     'quality': quality_concise_name, # Store concise quality for lookup
                     'quality_details': quality_full_details, # Store full details for stream description
                     'audio_languages': audio_languages,
@@ -990,7 +988,7 @@ def update_rss_feed_and_catalog():
             
             # Add the first stream for this new item
             stream_data = {
-                'title': title,
+                'title': title, # Store the concise title for the stream as well
                 'quality': quality_concise_name, # Store concise quality for lookup
                 'quality_details': quality_full_details, # Store full details for stream description
                 'audio_languages': audio_languages,
