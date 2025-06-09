@@ -29,6 +29,8 @@ DOMAIN_CHECK_INTERVAL_HOURS = int(os.environ.get('DOMAIN_CHECK_INTERVAL_HOURS', 
 DELETE_OLDER_THAN_YEARS = int(os.environ.get('DELETE_OLDER_THAN_YEARS', 2))
 # URL to fetch the latest torrent trackers
 TRACKERS_URL = os.environ.get('TRACKERS_URL', 'https://ngosang.github.io/trackerslist/trackers_all.txt')
+# Logging Level (e.g., 'DEBUG', 'INFO', 'WARNING', 'ERROR', 'CRITICAL')
+LOG_LEVEL = os.environ.get('LOG_LEVEL', 'INFO').upper()
 
 # --- Global Variables ---
 app = Flask(__name__)
@@ -39,14 +41,12 @@ current_rss_feed_url = RSS_FEED_URL_INITIAL
 best_trackers = []
 
 # --- Logging Setup ---
-logging.basicConfig(level=logging.INFO,
+logging.basicConfig(level=getattr(logging, LOG_LEVEL, logging.INFO),
                     format='%(asctime)s - %(levelname)s - %(message)s',
                     handlers=[logging.StreamHandler()])
 logger = logging.getLogger(__name__)
 
 # --- Helper Functions (Modularized below for better organization) ---
-# These functions will be defined in their respective files.
-# For now, let's keep the calls as if they are imported.
 
 # --- Redis Manager ---
 class RedisManager:
@@ -55,14 +55,20 @@ class RedisManager:
         self.client = redis.StrictRedis(host=host, port=port, db=db, decode_responses=True)
         logger.info(f"Connected to Redis at {host}:{port}/{db}")
 
+    def _sanitize_data(self, data):
+        """Converts any None values in a dictionary to empty strings for Redis compatibility."""
+        if isinstance(data, dict):
+            return {k: v if v is not None else "" for k, v in data.items()}
+        return data if data is not None else ""
+
     def set_catalog_item(self, stremio_id, data):
         """Stores a catalog item in Redis."""
         try:
-            # Store item metadata as a hash
-            self.client.hmset(f"catalog:{stremio_id}", data)
+            sanitized_data = self._sanitize_data(data)
+            self.client.hmset(f"catalog:{stremio_id}", sanitized_data)
             logger.info(f"Catalog item '{stremio_id}' stored/updated.")
         except Exception as e:
-            logger.error(f"Error storing catalog item '{stremio_id}': {e}")
+            logger.error(f"Error storing catalog item '{stremio_id}': {e}. Data: {data}")
 
     def get_catalog_item(self, stremio_id):
         """Retrieves a catalog item from Redis."""
@@ -83,20 +89,22 @@ class RedisManager:
             existing_streams_json = self.client.get(key)
             existing_streams = json.loads(existing_streams_json) if existing_streams_json else []
 
+            sanitized_stream_data = self._sanitize_data(stream_data)
+
             # Check if a stream with the same quality already exists and update it
             updated = False
             for i, s in enumerate(existing_streams):
-                if s.get('quality') == stream_data.get('quality'):
-                    existing_streams[i] = stream_data
+                if s.get('quality') == sanitized_stream_data.get('quality'):
+                    existing_streams[i] = sanitized_stream_data
                     updated = True
                     break
             if not updated:
-                existing_streams.append(stream_data)
+                existing_streams.append(sanitized_stream_data)
 
             self.client.set(key, json.dumps(existing_streams))
             logger.info(f"Stream for item '{stremio_id}' added/updated.")
         except Exception as e:
-            logger.error(f"Error adding stream for item '{stremio_id}': {e}")
+            logger.error(f"Error adding stream for item '{stremio_id}': {e}. Stream data: {stream_data}")
 
     def get_streams_for_item(self, stremio_id):
         """Retrieves streams for a catalog item from Redis."""
@@ -116,9 +124,6 @@ class RedisManager:
                 stremio_id = key.replace("catalog:", "")
                 item_data = self.client.hgetall(key)
                 if item_data:
-                    # Also fetch streams for full item representation if needed,
-                    # but for catalog it's usually just metadata.
-                    # streams = self.get_streams_for_item(stremio_id)
                     item_data['id'] = stremio_id # Add stremio_id to the item data
                     items.append(item_data)
             return items
@@ -241,7 +246,6 @@ class DomainResolver:
             # We assume the path structure for the RSS feed remains consistent
             # e.g., if old was https://old.com/path/to/feed.xml
             # and new is https://new.com/, then new feed is https://new.com/path/to/feed.xml
-            # We need to take the path from the original initial_rss_feed_url
             
             # Extract path from RSS_FEED_URL_INITIAL
             parsed_initial_url = requests.utils.urlparse(RSS_FEED_URL_INITIAL)
@@ -285,8 +289,8 @@ class TrackerManager:
             return magnet_uri
 
         # Remove existing 'tr' parameters to avoid duplicates
-        base_magnet, existing_params = magnet_uri.split('?', 1)
-        params = [p for p in existing_params.split('&') if not p.startswith('tr=')]
+        base_magnet, existing_params_str = magnet_uri.split('?', 1)
+        params = [p for p in existing_params_str.split('&') if not p.startswith('tr=')]
         
         # Append new trackers
         for tracker in best_trackers:
@@ -308,11 +312,9 @@ class RSSParser:
         items_data = []
         try:
             logger.info(f"Fetching RSS feed from: {feed_url}")
-            # Using requests directly to handle potential domain changes more flexibly
             response = requests.get(feed_url, timeout=20)
             response.raise_for_status()
             
-            # Use feedparser for robust RSS parsing
             feed = feedparser.parse(response.text)
 
             if feed.bozo:
@@ -323,36 +325,38 @@ class RSSParser:
                     title_full = entry.title
                     link = entry.link
                     description_html = entry.description
-                    pub_date_str = entry.published # e.g., 'Fri, 06 Jun 2025 03:43:41 -0700'
+                    pub_date_str = entry.published
                     
                     # Parse title, year, quality
-                    # Example: Mercy For None S01 (2025)[720p HDRip -[...]]
                     match = re.match(r"^(.*?)\s*\((\d{4})\)\[(.*?)\]", title_full)
-                    title = match.group(1).strip() if match else title_full.split('[')[0].strip() # Fallback
-                    year = match.group(2) if match else None
-                    quality_details = match.group(3).strip() if match else None
+                    # Sanitize parsed values immediately
+                    title = (match.group(1).strip() if match else title_full.split('[')[0].strip()) or ""
+                    year = (match.group(2) if match else None) or ""
+                    quality_details = (match.group(3).strip() if match else None) or ""
 
                     # Parse description for poster and magnet link
                     soup = BeautifulSoup(description_html, 'html.parser')
                     
                     poster_img = soup.find('img', class_='ipsImage', attrs={'data-src': True})
-                    poster_url = poster_img['data-src'] if poster_img else None
+                    poster_url = (poster_img['data-src'] if poster_img else None) or ""
 
                     magnet_link_tag = soup.find('a', class_='magnet-plugin', href=re.compile(r'magnet:\?xt=urn:btih:'))
-                    magnet_uri = magnet_link_tag['href'] if magnet_link_tag else None
+                    magnet_uri = (magnet_link_tag['href'] if magnet_link_tag else None) or ""
 
                     # Construct a unique ID for Stremio (e.g., from title and year)
                     stremio_id = f"tamilshows:{re.sub(r'[^a-zA-Z0-9]', '', title).lower()}{year or ''}"
                     
                     # Parse pubDate to datetime object
+                    pub_date_dt = None
                     try:
                         pub_date_dt = datetime.strptime(pub_date_str, '%a, %d %b %Y %H:%M:%S %z')
                     except ValueError:
-                        try: # Try alternative format if initial fails
+                        try:
                             pub_date_dt = datetime.strptime(pub_date_str, '%a, %d %b %Y %H:%M:%S %Z')
                         except ValueError:
                             logger.warning(f"Could not parse pubDate '{pub_date_str}' for '{title_full}'. Using current time.")
-                            pub_date_dt = datetime.now(entry.published_parsed.tzinfo if entry.published_parsed else None)
+                            # Set timezone-aware datetime if possible, otherwise naive
+                            pub_date_dt = datetime.now(entry.published_parsed.tzinfo if entry.published_parsed else None) or datetime.now()
 
 
                     if title and magnet_uri:
@@ -363,7 +367,7 @@ class RSSParser:
                             'quality_details': quality_details,
                             'poster': poster_url,
                             'magnet_uri': magnet_uri,
-                            'pub_date': pub_date_dt, # Store as datetime object
+                            'pub_date': pub_date_dt, # Store as datetime object temporarily for sorting, convert to string for Redis
                             'original_link': link
                         })
                 except Exception as item_e:
@@ -425,31 +429,23 @@ def catalog(type, id, extra=None):
 
     for item in all_items:
         # Construct meta object suitable for Stremio
-        # Note: Stremio meta objects are usually for movies/series.
-        # For series, it expects "name", "poster", "releaseInfo", "type", "imdb_id" (optional)
-        # Since we don't have IMDB/TMDB, we rely on our own unique ID.
         if 'title' in item and 'poster' in item:
             meta = {
                 "id": item['id'], # Use the stremio_id as the unique ID
                 "type": "series", # Or 'movie' if the RSS feed contains movies
                 "name": item['title'],
-                "" \
                 "poster": item['poster'],
                 "posterShape": "regular", # or 'landscape'
                 "description": item.get('quality_details', 'No description available.'),
                 "releaseInfo": item.get('year', ''),
                 "genres": ["Tamil Shows", "Web Series"],
-                "runtime": item.get('size', '') # If size was parsed, could put here
-                # Stremio also supports: background, logo, trailers, videos, directors, cast, etc.
-                # We only have basic info from the RSS feed.
+                "runtime": "" # Not available from RSS, but could be added if parsed
             }
             metas.append(meta)
     
     # Sort by publication date (most recent first)
-    # Re-fetch pub_date from redis if not already in item_data (might not be if only string stored)
-    # Or, preferably, store pub_date as a sortable string/timestamp in Redis.
-    # For now, let's sort by year if available, otherwise by title.
-    metas.sort(key=lambda x: (x.get('releaseInfo', '0'), x.get('name', '')), reverse=True)
+    # Assuming 'pub_date' is stored as an ISO format string in Redis.
+    metas.sort(key=lambda x: x.get('pub_date', '0000-01-01T00:00:00Z'), reverse=True)
 
     return jsonify({"metas": metas})
 
@@ -484,8 +480,9 @@ def stream(type, stremio_id):
             stremio_streams.append(stremio_stream)
     
     # Sort streams by quality (e.g., 1080p before 720p)
+    # This assumes quality strings are consistently parseable (e.g., '1080p', '720p', etc.)
     quality_order = {'2160p': 4, '1080p': 3, '720p': 2, '480p': 1}
-    stremio_streams.sort(key=lambda x: quality_order.get(x['title'].split('(')[-1].strip(')'), 0), reverse=True)
+    stremio_streams.sort(key=lambda x: quality_order.get(x['title'].split('(')[-1].strip(')').lower().replace(' ', '').replace('hdrip', 'p'), 0), reverse=True)
 
 
     return jsonify({"streams": stremio_streams})
@@ -498,9 +495,8 @@ def update_rss_feed_and_catalog():
     Scheduled task to fetch RSS feed, parse new items, and update Redis.
     """
     logger.info("Starting scheduled RSS feed update and catalog refresh...")
-    global current_rss_feed_url # Ensure we use the latest resolved URL
+    global current_rss_feed_url
     
-    # Use the current_rss_feed_url that might have been updated by domain resolver
     items = rss_parser.parse_rss_feed(current_rss_feed_url)
     
     new_entries_count = 0
@@ -509,7 +505,7 @@ def update_rss_feed_and_catalog():
     for item in items:
         stremio_id = item['stremio_id']
         title = item['title']
-        quality = item['quality_details'] # e.g., '720p HDRip'
+        quality = item['quality_details']
         magnet_uri = item['magnet_uri']
         poster = item['poster']
         year = item['year']
@@ -517,17 +513,16 @@ def update_rss_feed_and_catalog():
 
         existing_catalog_item = redis_client.get_catalog_item(stremio_id)
 
-        # Prepare item data for catalog
+        # Prepare item data for catalog (ensure values are strings)
         catalog_data = {
             'title': title,
             'year': year,
             'poster': poster,
             'quality_details': quality,
-            'last_updated': datetime.now().isoformat(), # Store as ISO format string
-            'pub_date': pub_date.isoformat() if pub_date else datetime.now().isoformat() # Store as ISO format string
+            'last_updated': datetime.now().isoformat(),
+            'pub_date': pub_date.isoformat() if pub_date else datetime.now().isoformat()
         }
 
-        # Check if this content (title + year) already exists
         if existing_catalog_item:
             # Check if a stream for this quality already exists for this item
             existing_streams = redis_client.get_streams_for_item(stremio_id)
@@ -545,12 +540,7 @@ def update_rss_feed_and_catalog():
                 updated_entries_count += 1
                 logger.info(f"Added new quality stream for existing item: {title} ({quality})")
             else:
-                # Update existing stream if magnet URI has changed (or any other relevant info)
-                # This could be more sophisticated, but for simplicity, let's assume same quality means same stream
-                # For this exercise, we will not update if stream already exists, only add new qualities.
-                # If you need to update, you would fetch all streams, modify the relevant one, and save the list back.
                 logger.debug(f"Item '{title}' with quality '{quality}' already exists. Skipping update.")
-                pass
         else:
             # New catalog item
             redis_client.set_catalog_item(stremio_id, catalog_data)
@@ -582,8 +572,6 @@ def scheduled_domain_resolution():
     if new_resolved_url and new_resolved_url != current_rss_feed_url:
         logger.info(f"Domain resolved: Old URL: {current_rss_feed_url}, New URL: {new_resolved_url}")
         current_rss_feed_url = new_resolved_url
-        # The domain_resolver.resolve_current_domain already handles updating poster domains
-        # if the domain has changed, so no need to call it again here.
     else:
         logger.info("Domain did not change or resolution failed.")
 
@@ -625,14 +613,13 @@ if __name__ == '__main__':
     tracker_manager.fetch_trackers()
     
     # 3. Populate catalog for the first time
-    # This will run immediately on startup to ensure there's data.
     update_rss_feed_and_catalog()
 
     # Schedule recurring tasks
     scheduler.add_job(update_rss_feed_and_catalog, 'interval', hours=FETCH_INTERVAL_HOURS, id='rss_fetch_job')
     scheduler.add_job(scheduled_domain_resolution, 'interval', hours=DOMAIN_CHECK_INTERVAL_HOURS, id='domain_resolve_job')
-    scheduler.add_job(scheduled_tracker_fetch, 'interval', hours=24, id='tracker_fetch_job') # Trackers once a day
-    scheduler.add_job(scheduled_cleanup_old_entries, 'interval', hours=24, id='cleanup_job') # Cleanup once a day
+    scheduler.add_job(scheduled_tracker_fetch, 'interval', hours=24, id='tracker_fetch_job')
+    scheduler.add_job(scheduled_cleanup_old_entries, 'interval', hours=24, id='cleanup_job')
 
     scheduler.start()
     logger.info("Scheduler started.")
