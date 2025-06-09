@@ -472,45 +472,68 @@ class RSSParser:
                 logger.warning(f"RSS feed parsing error (bozo bit set): {feed.bozo_exception}")
 
             for entry in feed.entries:
+                # Initialize variables at the start of each loop iteration to prevent NameError
+                title = "Unknown Title"
+                year = ""
+                base_stremio_id = ""
+                quality_details_raw = "N/A"
+                extracted_quality_for_name = "Standard Quality"
+                audio_languages = []
+                video_codec = ""
+                file_size = ""
+                catalog_poster_url = "https://placehold.co/185x278/000000/FFFFFF?text=No+Poster"
+                meta_poster_url = "https://placehold.co/500x750/000000/FFFFFF?text=No+Poster"
+                magnet_uri = ""
+                pub_date_dt = datetime.now()
+
                 try:
                     title_full = entry.title
                     link = entry.link
                     description_html = entry.description
                     pub_date_str = entry.published
                     
-                    # --- Initialize pub_date_dt here ---
-                    pub_date_dt = datetime.now() # Initialize with current datetime as a fallback
+                    # Parse pubDate to datetime object early, for logging even if other things fail
+                    try:
+                        pub_date_dt = datetime.strptime(pub_date_str, '%a, %d %b %Y %H:%M:%S %z')
+                    except ValueError:
+                        try:
+                            # Fallback for different timezone format
+                            pub_date_dt = datetime.strptime(pub_date_str, '%a, %d %b %Y %H:%M:%S %Z')
+                        except ValueError:
+                            logger.warning(f"Could not parse pubDate '{pub_date_str}' for '{title_full}'. Attempting from parsed_tuple.")
+                            if entry.published_parsed:
+                                try:
+                                    # Convert time.struct_time to datetime object
+                                    pub_date_dt = datetime.fromtimestamp(time.mktime(entry.published_parsed))
+                                except Exception:
+                                    logger.warning(f"Could not convert parsed_tuple to datetime for '{title_full}'. Using current time.")
+                                    pub_date_dt = datetime.now()
+                            else:
+                                pub_date_dt = datetime.now()
 
-                    # Initialize other variables for stream-specific details
-                    quality_details_raw = "" 
-                    audio_languages = []
-                    video_codec = ""
-                    file_size = ""
 
                     # --- REFINED Logic for parsing concise title and year for catalog display ---
-                    raw_entry_title = entry.title
-                    
-                    # Start with a working copy for base title extraction
-                    working_title_for_base = raw_entry_title
+                    working_title_for_base = entry.title
                     
                     # 1. Extract year from anywhere in the title, and then remove it to simplify
-                    year = ""
                     year_match = re.search(r"\b\((\d{4})\)\b", working_title_for_base) 
                     if year_match:
                         year = year_match.group(1)
                         # Remove the year and its parentheses from the working title
                         working_title_for_base = working_title_for_base.replace(year_match.group(0), '').strip()
                     
-                    # 2. Remove season and episode information
-                    # Common patterns: SXX, SXXEZZ, Season XX, Ep ZZ, E01-10, Part 1, Vol. 2
+                    # 2. Remove season and episode information - MORE ROBUST PATTERNS
                     season_episode_patterns = [
-                        r'\bS\d+E\d+(?:-\d+)?\b', # S01E01, S01E01-10
-                        r'\bS\d+\b',             # S01
-                        r'\bEP\s*\(\d+(?:-\d+)?\)\b', # EP(01-10)
-                        r'\bSeason\s+\d+\b',     # Season 1
-                        r'\bEpisode\s+\d+\b',    # Episode 1
-                        r'\bPart\s+\d+\b',       # Part 1
-                        r'\bVol(?:\.|ume)?\s+\d+\b' # Vol. 1, Volume 2
+                        r'\bS\d+E\d+(?:-\d+)?\b',           # S01E01, S01E01-10
+                        r'\bS\d+\b',                        # S01
+                        r'\bEP\s*\(\d+(?:-\d+)?\)\b',       # EP(01-10) - specifically for your example
+                        r'\bE(?:pisode)?\s*\d+(?:-\d+)?\b', # E01, Episode 01-06
+                        r'\bSeason\s+\d+\b',                # Season 1
+                        r'\bPart\s+\d+\b',                  # Part 1
+                        r'\bVol(?:\.|ume)?\s+\d+\b',        # Vol. 1, Volume 2
+                        r'\b\d+\s*Episodes?\b',             # 10 Episodes
+                        r'\bComplete\s*Season\b',           # Complete Season
+                        r'\bCollection\b'                   # Collection (can imply multiple parts/seasons)
                     ]
                     for pattern in season_episode_patterns:
                         working_title_for_base = re.sub(pattern, '', working_title_for_base, flags=re.IGNORECASE).strip()
@@ -536,9 +559,22 @@ class RSSParser:
                     # Fallback if after all cleaning, the title is empty
                     title = title or raw_entry_title.split('[')[0].strip() or "Unknown Title"
 
+                    # Re-extract year if it was not found earlier but is still in the clean title (e.g., "Movie Title 2023")
+                    # And remove it from title string to avoid passing it to TMDb query
+                    if not year:
+                        temp_year_match = re.search(r'\b(\d{4})\b', title)
+                        if temp_year_match:
+                            year = temp_year_match.group(1)
+                            # Remove year from title if found and remove it from title string
+                            title = title.replace(temp_year_match.group(0), '').strip()
+                            title = re.sub(r'[.\-_\s]+$', '', title).strip() # clean trailing chars again
+
+                    # Generate `base_stremio_id` using the now-clean title and year
+                    base_stremio_id = f"tamilshows:{re.sub(r'[^a-zA-Z0-9]', '', title).lower()}{year or ''}"
+                    if not base_stremio_id or "unknowntitle" in base_stremio_id.lower(): 
+                        base_stremio_id = f"tamilshows:unknown_item_{int(time.time() * 1000)}_{os.urandom(4).hex()}" 
 
                     # --- REFINED quality_details_raw extraction from description_html ---
-                    # This is for the *stream's* description, should be full details.
                     soup_desc = BeautifulSoup(description_html, 'html.parser')
                     
                     torrent_link_tag = soup_desc.find('a', class_='ipsAttachLink', attrs={'data-fileext': 'torrent'})
@@ -547,13 +583,11 @@ class RSSParser:
                         quality_match_from_filename = re.search(r'\[([^\]]+?)(?:\s*-\s*ESubs?)?\](?=\.torrent)', torrent_filename_text, re.IGNORECASE)
                         if quality_match_from_filename:
                             quality_details_raw = quality_match_from_filename.group(1).strip()
-                            logger.debug(f"Extracted quality_details_raw from torrent filename: [{quality_details_raw}]")
                     
-                    if not quality_details_raw:
+                    if not quality_details_raw: # Fallback to title_full if not found in filename
                         title_quality_match = re.search(r'\[([^\]]+?)(?:\s*-\s*ESubs?)?\]$', title_full, re.IGNORECASE)
                         if title_quality_match:
                             quality_details_raw = title_quality_match.group(1).strip()
-                            logger.debug(f"Extracted quality_details_raw from title_full (fallback): [{quality_details_raw}]")
 
                     quality_details_raw = re.sub(r'\s*-\s*ESubs?$', '', quality_details_raw, flags=re.IGNORECASE).strip()
                     quality_details_raw = re.sub(r'^\s*\[|\]\s*$', '', quality_details_raw).strip() 
@@ -608,14 +642,12 @@ class RSSParser:
                         extracted_quality_for_name = "Standard Quality"
 
                     # Ensure all extracted values are strings
-                    year = year or ""
                     quality_details_raw = quality_details_raw or "" 
                     video_codec = video_codec or ""
                     file_size = file_size or ""
 
 
                     # --- Poster URL Parsing (Original, as fallback) ---
-                    # This logic will be superseded by TMDb if a poster is found there
                     catalog_poster_from_rss = ""
                     meta_poster_from_rss = ""
 
@@ -695,24 +727,7 @@ class RSSParser:
                     magnet_link_tag = soup_desc.find('a', class_='magnet-plugin', href=re.compile(r'magnet:\?xt=urn:btih:'))
                     magnet_uri = (magnet_link_tag['href'] if magnet_link_tag else None) or ""
 
-                    # Parse pubDate to datetime object
-                    try:
-                        pub_date_dt = datetime.strptime(pub_date_str, '%a, %d %b %Y %H:%M:%S %z')
-                    except ValueError:
-                        try:
-                            pub_date_dt = datetime.strptime(pub_date_str, '%a, %d %b %Y %H:%M:%S %Z')
-                        except ValueError:
-                            logger.warning(f"Could not parse pubDate '{pub_date_str}' for '{title_full}'. Using current time.")
-                            if entry.published_parsed:
-                                try:
-                                    pub_date_dt = datetime.now(entry.published_parsed.tzinfo)
-                                except Exception:
-                                    pub_date_dt = datetime.now()
-                            else:
-                                pub_date_dt = datetime.now()
-
-
-                    # Add debug log
+                    # Log the parsed item details
                     logger.debug(f"Parsed Item: Base_ID='{base_stremio_id}', Concise_Title='{title}', Year='{year}', "
                                  f"Quality_Concise='{extracted_quality_for_name}', Quality_Full='{quality_details_raw}', "
                                  f"Audio_Languages='{audio_languages}', Video_Codec='{video_codec}', File_Size='{file_size}', "
