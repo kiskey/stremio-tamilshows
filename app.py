@@ -151,18 +151,33 @@ class RedisManager:
     def update_poster_domains(self, old_domain, new_domain):
         """
         Updates poster URLs for all catalog items in Redis if their domain matches old_domain.
+        Handles both 'poster_thumbnail' and 'poster_medium' fields.
         """
         try:
             keys = self.client.keys("catalog:*")
             updated_count = 0
             for key in keys:
                 item_data = self.client.hgetall(key)
-                if item_data and 'poster' in item_data and old_domain in item_data['poster']:
-                    new_poster_url = item_data['poster'].replace(old_domain, new_domain)
-                    self.client.hset(key, 'poster', new_poster_url)
+                
+                # Check and update poster_thumbnail
+                if 'poster_thumbnail' in item_data and old_domain in item_data['poster_thumbnail']:
+                    new_poster_url = item_data['poster_thumbnail'].replace(old_domain, new_domain)
+                    self.client.hset(key, 'poster_thumbnail', new_poster_url)
                     updated_count += 1
-                    logger.info(f"Updated poster domain for {item_data.get('id', 'N/A')}: {item_data['poster']} -> {new_poster_url}")
-            logger.info(f"Updated domains for {updated_count} poster URLs from '{old_domain}' to '{new_domain}'.")
+                    logger.info(f"Updated thumbnail poster domain for {item_data.get('id', 'N/A')}: {item_data['poster_thumbnail']} -> {new_poster_url}")
+                
+                # Check and update poster_medium
+                if 'poster_medium' in item_data and old_domain in item_data['poster_medium']:
+                    new_poster_url = item_data['poster_medium'].replace(old_domain, new_domain)
+                    self.client.hset(key, 'poster_medium', new_poster_url)
+                    updated_count += 1
+                    logger.info(f"Updated medium poster domain for {item_data.get('id', 'N/A')}: {item_data['poster_medium']} -> {new_poster_url}")
+            
+            if updated_count > 0:
+                logger.info(f"Updated domains for {updated_count} poster URLs from '{old_domain}' to '{new_domain}'.")
+            else:
+                logger.info(f"No poster URLs found to update for domain '{old_domain}'.")
+
         except Exception as e:
             logger.error(f"Error updating poster domains in Redis: {e}")
 
@@ -529,6 +544,9 @@ class RSSParser:
                     else:
                         extracted_quality_for_name = "Standard Quality" # More descriptive default if nothing found
 
+                    # description_quality should still reflect the full raw details for verbose description
+                    description_quality = quality_details_raw if quality_details_raw else "No additional quality details available."
+
                     # Ensure all extracted values are strings
                     title = title or ""
                     year = year or ""
@@ -537,8 +555,14 @@ class RSSParser:
                     file_size = file_size or ""
 
 
-                    # --- REFINED Logic for parsing poster URL ---
-                    poster_url = ""
+                    # --- REFINED Logic for parsing poster URL for thumbnail and medium ---
+                    catalog_poster_url = ""
+                    meta_poster_url = ""
+
+                    # Find the primary image tag with class="ipsImage" and a data-src attribute
+                    primary_img_tag = None
+                    # Select only 'ipsImage' that has a 'data-src' and exclude known bad images (like small icons or gifs)
+                    all_ips_images = soup_desc.find_all('img', class_='ipsImage', attrs={'data-src': True})
 
                     # Define known "bad" image patterns (emoticons, spacers, borders, small icons, generic gifs)
                     BAD_IMAGE_PATTERNS = [
@@ -560,7 +584,6 @@ class RSSParser:
 
                         for pattern in BAD_IMAGE_PATTERNS:
                             if re.search(pattern, url, re.IGNORECASE):
-                                logger.debug(f"Rejecting image by pattern: {url}")
                                 return True
 
                         width = -1
@@ -575,32 +598,34 @@ class RSSParser:
 
                         # If both dimensions are available and are very small (e.g., icons, buttons)
                         if width > 0 and height > 0 and (width < 100 or height < 100): 
-                            logger.debug(f"Rejecting image by small explicit size: {url} ({width}x{height})")
                             return True
                         
                         return False
 
-                    # Priority 1: Find images with data-src attribute that are NOT undesirable
-                    # This directly uses the CSS selector you suggested for data-src
-                    img_tags_data_src = soup_desc.select('img[data-src]')
-                    for img_tag in img_tags_data_src:
-                        if not is_undesirable_image(img_tag):
-                            poster_url = img_tag['data-src']
-                            logger.debug(f"Selected poster URL (data-src): {poster_url}")
-                            break
-                    
-                    # Fallback 2: If no good data-src image, try src attribute that are NOT undesirable
-                    if not poster_url:
-                        img_tags_src = soup_desc.select('img[src]')
-                        for img_tag in img_tags_src:
-                            if not is_undesirable_image(img_tag):
-                                poster_url = img_tag['src']
-                                logger.debug(f"Selected poster URL (src fallback): {poster_url}")
-                                break
 
-                    poster_url = poster_url or "" # Ensure it's an empty string if nothing valid found
-                    if not poster_url:
-                         logger.debug(f"Final check: Poster still not found for '{title}'. Poster URL: '{poster_url}'")
+                    for img_tag in all_ips_images:
+                        if not is_undesirable_image(img_tag):
+                            primary_img_tag = img_tag
+                            break # Found the first desirable poster image
+
+                    if primary_img_tag:
+                        # The data-src attribute is the medium-sized image URL
+                        meta_poster_url = primary_img_tag['data-src']
+                        
+                        # Construct the thumbnail URL by replacing '.md.jpg' with '.th.jpg'
+                        # We assume the .md.jpg suffix is consistent for medium images from picsxtra.com
+                        if '.md.jpg' in meta_poster_url:
+                            catalog_poster_url = meta_poster_url.replace('.md.jpg', '.th.jpg')
+                        else:
+                            # Fallback if the pattern doesn't match, use the medium size for both
+                            catalog_poster_url = meta_poster_url
+                    
+                    # Ensure they are strings, even if empty
+                    catalog_poster_url = catalog_poster_url or ""
+                    meta_poster_url = meta_poster_url or ""
+
+                    if not meta_poster_url: # Only log if *no* poster was found at all
+                         logger.debug(f"Final check: No primary poster found for '{title}'. Catalog Poster: '{catalog_poster_url}', Meta Poster: '{meta_poster_url}'")
 
 
                     magnet_link_tag = soup_desc.find('a', class_='magnet-plugin', href=re.compile(r'magnet:\?xt=urn:btih:'))
@@ -633,9 +658,9 @@ class RSSParser:
 
                     # Add debug log for parsed information - THIS IS KEY FOR DEBUGGING
                     logger.debug(f"Parsed Item: ID='{stremio_id}', Title='{title}', Year='{year}', "
-                                 f"Quality_Concise='{extracted_quality_for_name}', Quality_Full='{quality_details_raw}', " # Use clean raw
+                                 f"Quality_Concise='{extracted_quality_for_name}', Quality_Full='{quality_details_raw}', "
                                  f"Audio_Languages='{audio_languages}', Video_Codec='{video_codec}', File_Size='{file_size}', "
-                                 f"Poster='{poster_url}', Magnet='{magnet_uri}'")
+                                 f"Poster_Thumbnail='{catalog_poster_url}', Poster_Medium='{meta_poster_url}', Magnet='{magnet_uri}'")
 
 
                     if title and magnet_uri:
@@ -648,7 +673,8 @@ class RSSParser:
                             'audio_languages': json.dumps(audio_languages), # Store as JSON string
                             'video_codec': video_codec,
                             'file_size': file_size,
-                            'poster': poster_url,
+                            'poster_thumbnail': catalog_poster_url, # New field for catalog
+                            'poster_medium': meta_poster_url,       # New field for meta
                             'magnet_uri': magnet_uri,
                             'pub_date': pub_date_dt, 
                             'original_link': link
@@ -716,13 +742,14 @@ def catalog(type, id, extra=None):
     metas = []
 
     for item in all_items:
-        if 'title' in item and 'poster' in item:
+        # Check for 'poster_thumbnail' as the primary poster for catalog
+        if 'title' in item and 'poster_thumbnail' in item: 
             meta = {
-                "id": item['id'], # This will now be our custom 'tamilshows:' ID
+                "id": item['id'], 
                 "type": "movie", 
                 "name": item['title'], 
-                "poster": item['poster'],
-                "posterShape": "poster", # Changed from "regular" to "poster"
+                "poster": item['poster_thumbnail'], # Use thumbnail for catalog
+                "posterShape": "poster", 
                 "description": item.get('quality_details', 'No description available.'),
                 "releaseInfo": item.get('year', ''),
                 "genres": ["Tamil Shows", "Web Series"], 
@@ -804,7 +831,7 @@ def meta(type, id):
             "id": item['id'],
             "type": "movie",
             "name": item['title'], # Use the cleaned title from the item
-            "poster": item['poster'],
+            "poster": item['poster_medium'], # Use medium size for meta
             "posterShape": "poster", 
             "description": item.get('quality_details', 'No description available.'), # Use the cleaned raw details here
             "releaseInfo": item.get('year', ''),
@@ -917,9 +944,9 @@ def update_rss_feed_and_catalog():
         audio_languages = item['audio_languages']
         video_codec = item['video_codec']
         file_size = item['file_size']
+        poster_thumbnail = item['poster_thumbnail'] # Get new field
+        poster_medium = item['poster_medium']       # Get new field
         magnet_uri = item['magnet_uri']
-        poster = item['poster']
-        year = item['year']
         pub_date = item['pub_date']
 
         existing_catalog_item = redis_client.get_catalog_item(stremio_id)
@@ -927,9 +954,10 @@ def update_rss_feed_and_catalog():
         # Prepare item data for catalog (ensure values are strings)
         catalog_data = {
             'title': title,
-            'year': year,
-            'poster': poster,
-            'quality_details': quality_full_details, # Store full details
+            'year': item['year'], # Use item['year'] directly
+            'poster_thumbnail': poster_thumbnail, # Store thumbnail for catalog
+            'poster_medium': poster_medium,       # Store medium for meta
+            'quality_details': quality_full_details,
             'last_updated': datetime.now().isoformat(),
             'pub_date': pub_date.isoformat() if pub_date else datetime.now().isoformat()
         }
