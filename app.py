@@ -30,10 +30,12 @@ DOMAIN_CHECK_INTERVAL_HOURS = int(os.environ.get('DOMAIN_CHECK_INTERVAL_HOURS', 
 DELETE_OLDER_THAN_YEARS = int(os.environ.get('DELETE_OLDER_THAN_YEARS', 2))
 # URL to fetch the latest torrent trackers
 TRACKERS_URL = os.environ.get('TRACKERS_URL', 'https://ngosang.github.io/trackerslist/trackers_all.txt')
+# TMDB API Key - No longer strictly needed for ID, but keeping for reference if future meta needs arise
+TMDB_API_KEY = os.environ.get('TMDB_API_KEY', '') 
 # Logging Level (e.g., 'DEBUG', 'INFO', 'WARNING', 'ERROR', 'CRITICAL')
 LOG_LEVEL = os.environ.get('LOG_LEVEL', 'INFO').upper()
 # Clear THIS APP's Redis cache on startup if 'true' or '1'
-CLEAR_REDIS_ON_STARTUP = os.environ.get('CLEAR_REDIS_ON_STARTUP', 'false').lower() == 'true'
+CLEAR_REDIS_ON_STARTUP = os.environ.get('CLEAR_REDIS_ON_STARTUP', 'false').lower() == 'true' # <<< Set to 'true' for one run after this update!
 
 # --- Global Variables ---
 app = Flask(__name__)
@@ -283,6 +285,56 @@ class DomainResolver:
             logger.error(f"Failed to resolve current domain from master domain {self.master_domain}: {e}")
             return initial_rss_feed_url # Fallback to initial if resolution fails
 
+# --- TMDB API Manager ---
+# TMDB API Manager is no longer used for ID generation, but kept for potential future use.
+class TmdbManager:
+    """Manages interactions with TMDB API for metadata."""
+    def __init__(self, api_key):
+        self.api_key = api_key
+        self.base_url = "https://api.themoviedb.org/3"
+
+    def search_movie_or_tv(self, title, year, item_type="movie"):
+        """Searches TMDB for a movie or TV show by title and year."""
+        if not self.api_key:
+            logger.warning("TMDB_API_KEY is not set. Skipping TMDB search.")
+            return None
+
+        endpoint = f"{self.base_url}/search/{item_type}"
+        params = {
+            "api_key": self.api_key,
+            "query": title,
+            "year": year,
+            "language": "en-US"
+        }
+        try:
+            response = requests.get(endpoint, params=params, timeout=5)
+            response.raise_for_status()
+            data = response.json()
+            if data and data['results']:
+                # Return the first result
+                return data['results'][0]
+            return None
+        except requests.exceptions.RequestException as e:
+            logger.error(f"Error searching TMDB for '{title}' ({year}): {e}")
+            return None
+
+    def get_external_ids(self, tmdb_id, item_type="movie"):
+        """Fetches external IDs (like IMDb ID) for a given TMDB ID."""
+        if not self.api_key:
+            logger.warning("TMDB_API_KEY is not set. Cannot fetch external IDs.")
+            return None
+
+        endpoint = f"{self.base_url}/{item_type}/{tmdb_id}/external_ids"
+        params = {"api_key": self.api_key}
+        try:
+            response = requests.get(endpoint, params=params, timeout=5)
+            response.raise_for_status()
+            data = response.json()
+            return data
+        except requests.exceptions.RequestException as e:
+            logger.error(f"Error fetching external IDs for TMDB ID '{tmdb_id}': {e}")
+            return None
+
 # --- Tracker Manager ---
 class TrackerManager:
     """Manages fetching and appending torrent trackers."""
@@ -330,8 +382,10 @@ class TrackerManager:
 # --- RSS Parser ---
 class RSSParser:
     """Parses RSS feed items and extracts relevant data."""
-    def __init__(self, domain_resolver):
+    # TMDB Manager is no longer passed as it's not used for ID generation
+    def __init__(self, domain_resolver): # Removed tmdb_manager from __init__
         self.domain_resolver = domain_resolver
+        # self.tmdb_manager = tmdb_manager # Removed
 
     def parse_rss_feed(self, feed_url):
         """
@@ -481,23 +535,10 @@ class RSSParser:
                     magnet_link_tag = soup.find('a', class_='magnet-plugin', href=re.compile(r'magnet:\?xt=urn:btih:'))
                     magnet_uri = (magnet_link_tag['href'] if magnet_link_tag else None) or ""
 
-                    # Construct a unique ID for Stremio
-                    stremio_id_base = re.sub(r'[^a-zA-Z0-9]', '', title).lower()
-                    if not stremio_id_base: # Fallback if title becomes empty
+                    # Construct stremio_id with custom prefix only
+                    stremio_id = f"tamilshows:{re.sub(r'[^a-zA-Z0-9]', '', title).lower()}{year or ''}"
+                    if not stremio_id: # Fallback if original title also becomes empty
                         stremio_id = f"tamilshows:unknown{entry.guid or int(time.time() * 1000)}"
-                    else:
-                        stremio_id = f"tamilshows:{stremio_id_base}{year or ''}"
-                    
-                    # Parse pubDate to datetime object
-                    pub_date_dt = None
-                    try:
-                        pub_date_dt = datetime.strptime(pub_date_str, '%a, %d %b %Y %H:%M:%S %z')
-                    except ValueError:
-                        try:
-                            pub_date_dt = datetime.strptime(pub_date_str, '%a, %d %b %Y %H:%M:%S %Z')
-                        except ValueError:
-                            logger.warning(f"Could not parse pubDate '{pub_date_str}' for '{title_full}'. Using current time.")
-                            pub_date_dt = datetime.now(entry.published_parsed.tzinfo if entry.published_parsed else None) or datetime.now()
 
                     # Add debug log for parsed information
                     logger.debug(f"Parsed Item: ID='{stremio_id}', Title='{title}', Year='{year}', "
@@ -543,12 +584,14 @@ def manifest():
         "description": "Stremio addon to fetch Tamil web series and TV shows from 1TamilBlasters RSS feed.",
         "resources": [
             "catalog",
-            "stream"
+            "stream",
+            "meta" # Added 'meta' resource
         ],
-        "types": ["movie"], # Changed to 'movie'
+        "types": ["movie"], 
+        "idPrefixes": ["tamilshows:"], # Added idPrefixes for our custom IDs
         "catalogs": [
             {
-                "type": "movie", # Changed to 'movie'
+                "type": "movie", 
                 "id": "tamil_shows_catalog",
                 "name": "Tamil Shows",
                 "extraRequired": [],
@@ -561,7 +604,7 @@ def manifest():
         "behaviorHints": {
             "configurable": True,
             "randomize": False,
-            "p2p": True # Added p2p hint here
+            "p2p": True 
         }
     }
     return jsonify(manifest_data)
@@ -573,7 +616,7 @@ def catalog(type, id, extra=None):
     Returns the catalog of Tamil shows.
     Stremio expects 'meta' objects for each item.
     """
-    if type != "movie" or id != "tamil_shows_catalog": # Changed to 'movie'
+    if type != "movie" or id != "tamil_shows_catalog": 
         return jsonify({"metas": []})
 
     all_items = redis_client.get_all_catalog_items()
@@ -582,16 +625,15 @@ def catalog(type, id, extra=None):
     for item in all_items:
         if 'title' in item and 'poster' in item:
             meta = {
-                "id": item['id'], # This is the unique ID for the item
-                "type": "movie", # Changed to 'movie'
-                "name": item['title'], # The full name of the item
+                "id": item['id'], # This will now be our custom 'tamilshows:' ID
+                "type": "movie", 
+                "name": item['title'], 
                 "poster": item['poster'],
                 "posterShape": "regular",
                 "description": item.get('quality_details', 'No description available.'),
                 "releaseInfo": item.get('year', ''),
-                "genres": ["Tamil Shows", "Web Series"], # Still relevant genres
+                "genres": ["Tamil Shows", "Web Series"], 
                 "runtime": ""
-                # Removed 'videos' array as it's not needed for 'movie' type
             }
             metas.append(meta)
     
@@ -602,12 +644,43 @@ def catalog(type, id, extra=None):
     return jsonify({"metas": metas})
 
 
+@app.route('/meta/<type>/<id>.json') # New /meta endpoint
+def meta(type, id):
+    """
+    Returns full metadata for a given Stremio ID.
+    This is requested by Stremio when a user clicks on a catalog item.
+    """
+    if type != "movie":
+        return jsonify({"meta": None})
+
+    item = redis_client.get_catalog_item(id) # ID here is the stremio_id
+
+    if item:
+        meta_obj = {
+            "id": item['id'],
+            "type": "movie",
+            "name": item['title'],
+            "poster": item['poster'],
+            "posterShape": "regular",
+            "description": item.get('quality_details', 'No description available.'),
+            "releaseInfo": item.get('year', ''),
+            "genres": ["Tamil Shows", "Web Series"],
+            "runtime": ""
+        }
+        logger.debug(f"Returning meta for '{id}': {json.dumps(meta_obj, indent=2)}")
+        return jsonify({"meta": meta_obj})
+    else:
+        logger.warning(f"Metadata not found for ID: {id}")
+        return jsonify({"meta": None})
+
+
 @app.route('/stream/<type>/<stremio_id>.json')
 def stream(type, stremio_id):
     """
     Returns stream links for a given Stremio ID.
     """
-    if type != "movie": # Changed to 'movie'
+    # stremio_id will now be our custom 'tamilshows:' ID
+    if type != "movie": 
         return jsonify({"streams": []})
 
     streams_data = redis_client.get_streams_for_item(stremio_id)
@@ -639,7 +712,7 @@ def stream(type, stremio_id):
             # Format trackers for Stremio's 'sources' field (tracker:URL or dht:NODE_ID)
             stremio_sources = [f"tracker:{url}" for url in tracker_urls_matches]
             
-            # *** ADD DHT SOURCE HERE ***
+            # Add DHT SOURCE 
             if info_hash:
                 stremio_sources.append(f"dht:{info_hash}")
 
@@ -807,8 +880,11 @@ if __name__ == '__main__':
 
     # Initialize Managers
     domain_resolver = DomainResolver(MASTER_DOMAIN, redis_client)
+    # TMDB Manager is no longer used for ID generation
+    # tmdb_manager = TmdbManager(TMDB_API_KEY) 
     tracker_manager = TrackerManager(TRACKERS_URL)
-    rss_parser = RSSParser(domain_resolver)
+    # Pass domain_resolver only to RSS Parser
+    rss_parser = RSSParser(domain_resolver) # Removed tmdb_manager from constructor
 
     # Perform initial setup tasks immediately on startup
     logger.info("Performing initial setup tasks...")
