@@ -429,11 +429,17 @@ class RSSParser:
                     title_parts_split_by_last_bracket = title_full.rsplit('[', 1)
                     
                     if len(title_parts_split_by_last_bracket) > 1:
+                        # Before stripping, capture the potential quality raw string
+                        quality_details_raw_candidate = title_parts_split_by_last_bracket[1].rstrip(']').strip()
+                        # Now, clean the title candidate
                         title_candidate = title_parts_split_by_last_bracket[0].strip()
-                        quality_details_raw = title_parts_split_by_last_bracket[1].rstrip(']').strip()
+                        
+                        # Use the captured raw quality string if it's not empty, otherwise default
+                        quality_details_raw = quality_details_raw_candidate or ""
                     else:
                         title_candidate = title_full.strip()
-                        quality_details_raw = ""
+                        quality_details_raw = "" # No quality details found in brackets
+
 
                     # Extract year (if present) from title_candidate
                     year_match = re.search(r"\((\d{4})\)", title_candidate)
@@ -447,7 +453,8 @@ class RSSParser:
 
                     # Clean up title_base from potential trailing "S01 EP(01-12)" or similar if it's not the year
                     # This step is crucial if the format is "Show Name S01 EP(01-12) [quality]"
-                    episode_info_match = re.search(r'(S\d+E\d+|S\d+\s*EP\(\d+-\d+\))', title_base, re.IGNORECASE)
+                    # The pattern for quality/episode info should be refined to target what's left after initial split
+                    episode_info_match = re.search(r'(S\d+E\d+|S\d+\s*EP\(\d+-\d+\)|Season \d+ Episode \d+)', title_base, re.IGNORECASE)
                     if episode_info_match:
                         title_base = title_base[:episode_info_match.start()].strip()
 
@@ -455,7 +462,7 @@ class RSSParser:
                     # Ensure all extracted values are strings
                     title = title_base or ""
                     year = year or ""
-                    quality_details_raw = quality_details_raw or ""
+                    quality_details_raw = quality_details_raw or "" # Ensure it's string, not None
 
                     # Refine quality_details for Stremio's 'name' and 'description'
                     concise_quality_elements = []
@@ -474,7 +481,7 @@ class RSSParser:
                         concise_quality_elements.append('HD')
                     
                     # Video Codec (x264, H.264, H.265, HEVC)
-                    video_codec_match = re.search(r'(x264|H\.264|H\.265|HEVC)', quality_details_raw, re.IGNORECASE)
+                    video_codec_match = re.search(r'(x264|H\.264|H\.265|HEVC|AVC)', quality_details_raw, re.IGNORECASE)
                     if video_codec_match:
                         video_codec = video_codec_match.group(1).upper()
                     
@@ -489,40 +496,66 @@ class RSSParser:
                     if size_match:
                         file_size = size_match.group(1).upper()
 
-                    extracted_quality_for_name = " ".join(concise_quality_elements)
-                    # Fallback: if no specific resolution/quality was found but raw data exists, take the first segment
-                    if not extracted_quality_for_name and quality_details_raw:
+                    # Final decision for extracted_quality_for_name
+                    if concise_quality_elements:
+                        extracted_quality_for_name = " ".join(concise_quality_elements)
+                    elif quality_details_raw: # Fallback to first segment if no specific keywords
                         extracted_quality_for_name = quality_details_raw.split('-')[0].strip()
-                    if not extracted_quality_for_name:
-                        extracted_quality_for_name = "Unknown Quality" # Final fallback
+                    else:
+                        extracted_quality_for_name = "Unknown Quality" # Default if nothing found
 
-
-                    description_quality = quality_details_raw if quality_details_raw else "No description available."
+                    description_quality = quality_details_raw if quality_details_raw else "No additional quality details available."
 
                     # --- Logic for parsing poster URL - REFINED ---
                     soup = BeautifulSoup(description_html, 'html.parser')
                     poster_url = ""
 
-                    # Prioritize finding the main poster image with 'data-src'
+                    # Define known "bad" image patterns (emoticons, spacers, borders)
+                    BAD_IMAGE_PATTERNS = [
+                        r'spacer\.png$', # Stremio's default placeholder
+                        r'emoticons/clapping\.gif$', # Common emoji from your logs
+                        r'torrborder\.gif$', # Common border from your logs
+                        r'torrenticon_92x92_blue\.png$' # Small icon from your logs
+                    ]
+
+                    # Function to check if a URL matches any bad pattern
+                    def is_bad_image_url(url):
+                        if not url: return True
+                        for pattern in BAD_IMAGE_PATTERNS:
+                            if re.search(pattern, url, re.IGNORECASE):
+                                return True
+                        return False
+
+                    # Try to find a good poster with data-src first
                     all_data_src_images = soup.find_all('img', attrs={'data-src': True})
                     for img_tag in all_data_src_images:
                         temp_url = img_tag.get('data-src')
-                        # Ensure it's a valid URL and not the placeholder spacer image
-                        if temp_url and not temp_url.endswith("spacer.png"):
-                            poster_url = temp_url
-                            logger.debug(f"Poster found (Priority Data-Src): {poster_url}")
-                            break # Found a good one, stop searching
+                        if temp_url and not is_bad_image_url(temp_url):
+                            # Add a basic size check to prefer larger images (heuristics)
+                            width = int(img_tag.get('width', 0))
+                            height = int(img_tag.get('height', 0))
+                            if width > 100 or height > 100: # Arbitrary threshold for a "real" poster
+                                poster_url = temp_url
+                                logger.debug(f"Poster found (Priority Data-Src, large enough): {poster_url}")
+                                break
+                            else:
+                                logger.debug(f"Skipping small data-src image: {temp_url} (size: {width}x{height})")
 
-                    # Fallback to img tags with 'src' if no 'data-src' image was found or valid
+
+                    # Fallback to src if no good data-src image was found
                     if not poster_url:
                         all_src_images = soup.find_all('img', attrs={'src': True})
                         for img_tag in all_src_images:
                             temp_url = img_tag.get('src')
-                            # Ensure it's a valid URL and not the placeholder spacer image
-                            if temp_url and not temp_url.endswith("spacer.png"):
-                                poster_url = temp_url
-                                logger.debug(f"Poster found (Fallback Src): {poster_url}")
-                                break # Found a good one, stop searching
+                            if temp_url and not is_bad_image_url(temp_url):
+                                width = int(img_tag.get('width', 0))
+                                height = int(img_tag.get('height', 0))
+                                if width > 100 or height > 100:
+                                    poster_url = temp_url
+                                    logger.debug(f"Poster found (Fallback Src, large enough): {poster_url}")
+                                    break
+                                else:
+                                    logger.debug(f"Skipping small src image: {temp_url} (size: {width}x{height})")
 
                     poster_url = poster_url or "" # Ensure it's an empty string if nothing valid found
                     if not poster_url:
@@ -707,7 +740,7 @@ def meta(type, id):
                 stream_name_parts.append(quality_for_name)
             stream_name = " ".join(stream_name_parts)
 
-            stream_title_parts = [s_data.get('title', 'N/A')]
+            stream_title_parts = [item.get('title', 'N/A')] # Use cleaned title from item
             if audio_languages:
                 stream_title_parts.append(f"({', '.join(audio_languages)})")
             if video_codec:
@@ -727,9 +760,9 @@ def meta(type, id):
         meta_obj = {
             "id": item['id'],
             "type": "movie",
-            "name": item['title'],
+            "name": item['title'], # Use the cleaned title from the item
             "poster": item['poster'],
-            "posterShape": "poster", # Changed from "regular" to "poster"
+            "posterShape": "poster", 
             "description": item.get('quality_details', 'No description available.'),
             "releaseInfo": item.get('year', ''),
             "genres": ["Tamil Shows", "Web Series"],
@@ -749,6 +782,7 @@ def stream(type, stremio_id):
     Returns stream links for a given Stremio ID.
     This endpoint is still implemented as per Stremio SDK recommendations,
     even though streams are now primarily embedded in the /meta response.
+    It will be hit by Stremio if embedded streams are not present or failed for some reason.
     """
     if type != "movie": 
         return jsonify({"streams": []})
@@ -759,66 +793,59 @@ def stream(type, stremio_id):
     for s_data in streams_data:
         magnet_uri = s_data.get('magnet_uri')
         
-        # Retrieve parsed quality details from Redis
         quality_for_name = s_data.get('quality_for_name') 
         description_quality = s_data.get('quality_details') or "No description available."
         
-        # Parse stored JSON strings back to Python objects
         audio_languages = json.loads(s_data.get('audio_languages', '[]'))
         video_codec = s_data.get('video_codec', '')
         file_size = s_data.get('file_size', '')
         
         if magnet_uri:
-            # Append best trackers to the magnet URI
             final_magnet_uri = tracker_manager.append_trackers_to_magnet(magnet_uri)
-            
-            # Extract infoHash
             info_hash_match = re.search(r'btih:([^&]+)', final_magnet_uri)
             info_hash = info_hash_match.group(1) if info_hash_match else None
 
-            # Extract tracker URLs from the final_magnet_uri for the 'sources' field
-            tracker_urls_matches = re.findall(r'tr=([^&]+)', final_magnet_uri)
-            
-            # Format trackers for Stremio's 'sources' field (tracker:URL or dht:NODE_ID)
-            stremio_sources = [f"tracker:{url}" for url in tracker_urls_matches]
-            
-            # Add DHT SOURCE 
-            if info_hash:
-                stremio_sources.append(f"dht:{info_hash}")
-
-            if info_hash: # Only add stream if we successfully got an infoHash
-                # --- Constructing stream.name and stream.title ---
-                stream_name_parts = ["TamilBlasters"]
-                if quality_for_name and quality_for_name != "Unknown Quality":
-                    stream_name_parts.append(quality_for_name)
-                stream_name = " ".join(stream_name_parts)
-
-                stream_title_parts = [s_data.get('title', 'N/A')]
-                if audio_languages:
-                    stream_title_parts.append(f"({', '.join(audio_languages)})")
-                if video_codec:
-                    stream_title_parts.append(video_codec)
-                if file_size:
-                    stream_title_parts.append(file_size)
-                stream_title = " ".join(stream_title_parts)
-
-                stremio_stream = {
-                    "name": stream_name, 
-                    "description": f"Source: 1TamilBlasters - {description_quality}", 
-                    "infoHash": info_hash,
-                    "sources": stremio_sources, 
-                    "title": stream_title
-                }
-                stremio_streams.append(stremio_stream)
-                logger.debug(f"Returning stream object for '{stremio_id}': {json.dumps(stremio_stream, indent=2)}")
-            else:
+            if not info_hash:
                 logger.warning(f"Could not extract infoHash for stream '{stremio_id}' with magnet URI: {magnet_uri}")
+                continue
+            
+            tracker_urls_matches = re.findall(r'tr=([^&]+)', final_magnet_uri)
+            stremio_sources = [f"tracker:{url}" for url in tracker_urls_matches]
+            stremio_sources.append(f"dht:{info_hash}")
+
+            # --- Constructing stream.name and stream.title ---
+            stream_name_parts = ["TamilBlasters"]
+            if quality_for_name and quality_for_name != "Unknown Quality":
+                stream_name_parts.append(quality_for_name)
+            stream_name = " ".join(stream_name_parts)
+
+            # Use the original title from the item in Redis
+            item_data = redis_client.get_catalog_item(stremio_id)
+            original_title = item_data.get('title', 'N/A') if item_data else 'N/A'
+
+            stream_title_parts = [original_title] 
+            if audio_languages:
+                stream_title_parts.append(f"({', '.join(audio_languages)})")
+            if video_codec:
+                stream_title_parts.append(video_codec)
+            if file_size:
+                stream_title_parts.append(file_size)
+            stream_title = " ".join(stream_title_parts)
+
+            stremio_stream = {
+                "name": stream_name, 
+                "description": f"Source: 1TamilBlasters - {description_quality}", 
+                "infoHash": info_hash,
+                "sources": stremio_sources, 
+                "title": stream_title
+            }
+            stremio_streams.append(stremio_stream)
+            logger.debug(f"Returning stream object for '{stremio_id}': {json.dumps(stremio_stream, indent=2)}")
         else:
             logger.warning(f"No magnet URI found for stream '{stremio_id}'. Skipping stream entry.")
 
     # Sort streams by quality (e.g., 1080p before 720p)
-    # This assumes quality strings are consistently parseable (e.g., '1080p', '720p', etc.)
-    quality_order = {'4K': 5, '2160P': 4, '1080P': 3, '720P': 2, '480P': 1} # Adjusted order for '4K'
+    quality_order = {'4K': 5, '2160P': 4, '1080P': 3, '720P': 2, '480P': 1} 
     stremio_streams.sort(key=lambda x: quality_order.get(re.search(r'(\d+P|4K)', x['name'].upper())[0] if re.search(r'(\d+P|4K)', x['name'].upper()) else '', 0), reverse=True)
 
 
