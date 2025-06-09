@@ -366,26 +366,32 @@ class RSSParser:
 
 
                     # --- Logic for parsing title and quality ---
-                    last_open_bracket_idx = title_full.rfind('[')
-                    last_close_bracket_idx = title_full.rfind(']')
-
-                    if last_open_bracket_idx != -1 and last_close_bracket_idx != -1 and last_close_bracket_idx > last_open_bracket_idx:
-                        quality_details_raw = title_full[last_open_bracket_idx + 1:last_close_bracket_idx].strip()
-                        processed_title_for_year = title_full[:last_open_bracket_idx].strip()
+                    # Split title_full by the LAST '[' to separate base title from potential quality/extra info
+                    title_parts_split_by_last_bracket = title_full.rsplit('[', 1)
+                    
+                    if len(title_parts_split_by_last_bracket) > 1:
+                        title_candidate = title_parts_split_by_last_bracket[0].strip()
+                        quality_details_raw = title_parts_split_by_last_bracket[1].rstrip(']').strip()
                     else:
+                        title_candidate = title_full.strip()
                         quality_details_raw = ""
-                        processed_title_for_year = title_full.strip()
 
-                    # Extract year (if present) from the remaining title string
-                    year_match = re.search(r"\((\d{4})\)", processed_title_for_year)
+                    # Extract year (if present) from title_candidate
+                    year_match = re.search(r"\((\d{4})\)", title_candidate)
                     if year_match:
                         year = year_match.group(1)
-                        # Remove the year part to get the clean title
-                        title_before_year = processed_title_for_year[:year_match.start()].strip()
-                        title_after_year = processed_title_for_year[year_match.end():].strip()
-                        title_base = (title_before_year + (" " if title_before_year and title_after_year else "") + title_after_year).strip()
+                        # Remove the year and its parentheses from the title_candidate to get clean title_base
+                        title_base = title_candidate.replace(year_match.group(0), '').strip()
                     else:
-                        title_base = processed_title_for_year.strip() # No year found
+                        year = ""
+                        title_base = title_candidate.strip()
+
+                    # Clean up title_base from potential trailing "S01 EP(01-12)" or similar if it's not the year
+                    # This step is crucial if the format is "Show Name S01 EP(01-12) [quality]"
+                    episode_info_match = re.search(r'(S\d+E\d+|S\d+\s*EP\(\d+-\d+\))', title_base, re.IGNORECASE)
+                    if episode_info_match:
+                        title_base = title_base[:episode_info_match.start()].strip()
+
 
                     # Ensure all extracted values are strings
                     title = title_base or ""
@@ -439,26 +445,28 @@ class RSSParser:
                     
                     # Prioritize finding img tags with 'data-src' that are not 'spacer.png'
                     # Look for img within an 'a' tag that has a 'data-src' and not a spacer
-                    a_tag_with_img = soup.find('a', href=True)
-                    if a_tag_with_img:
-                        potential_poster_img = a_tag_with_img.find('img', attrs={'data-src': True})
-                        if potential_poster_img:
-                            temp_url = potential_poster_img.get('data-src')
+                    main_poster_anchor = soup.find('a', attrs={'rel': 'external nofollow'})
+                    if main_poster_anchor:
+                        img_tag_in_anchor = main_poster_anchor.find('img', attrs={'data-src': True})
+                        if img_tag_in_anchor:
+                            temp_url = img_tag_in_anchor.get('data-src')
                             if temp_url and "spacer.png" not in temp_url:
                                 poster_url = temp_url
+                                logger.debug(f"Poster found via rel='external nofollow' anchor: {poster_url}")
 
-                    # Fallback: if no poster found by the above, look for any img with data-src
+                    # Fallback: if not found, look for any img with data-src directly
                     if not poster_url:
                         all_data_src_images = soup.find_all('img', attrs={'data-src': True})
                         for img_tag in all_data_src_images:
                             temp_url = img_tag.get('data-src')
                             if temp_url and "spacer.png" not in temp_url:
                                 poster_url = temp_url
-                                break 
+                                logger.debug(f"Poster found via direct img[data-src]: {poster_url}")
+                                break # Take the first valid one
 
-                    poster_url = poster_url or "" # Ensure it's an empty string if nothing found
+                    poster_url = poster_url or "" # Ensure it's an empty string if nothing valid found
                     if not poster_url:
-                        logger.debug(f"Poster not found or it's a spacer for '{title}'. Poster URL: '{poster_url}'")
+                         logger.debug(f"Final check: Poster still not found for '{title}'. Poster URL: '{poster_url}'")
 
 
                     magnet_link_tag = soup.find('a', class_='magnet-plugin', href=re.compile(r'magnet:\?xt=urn:btih:'))
@@ -562,25 +570,58 @@ def catalog(type, id, extra=None):
     metas = []
 
     for item in all_items:
-        # Construct meta object suitable for Stremio
         if 'title' in item and 'poster' in item:
+            # Extract season and episode from title_base if present, for Stremio's video object
+            # Example title: "Hai Junoon Dream Dare Dominate S01 EP(01-20)"
+            season_num = 1 # Default season if not found
+            episode_num = 1 # Default episode if not found
+            
+            # Try to find SXXEP(YY-ZZ) format
+            episode_info_match = re.search(r'S(\d+)\s*EP\((\d+)-(\d+)\)', item['title'], re.IGNORECASE)
+            if episode_info_match:
+                season_num = int(episode_info_match.group(1))
+                episode_num = int(episode_info_match.group(2)) # Use the first episode number for the video object
+            else:
+                # Try to find SXXEYY format
+                single_episode_match = re.search(r'S(\d+)E(\d+)', item['title'], re.IGNORECASE)
+                if single_episode_match:
+                    season_num = int(single_episode_match.group(1))
+                    episode_num = int(single_episode_match.group(2))
+                else:
+                    # Fallback to just SXX
+                    single_season_match = re.search(r'S(\d+)', item['title'], re.IGNORECASE)
+                    if single_season_match:
+                        season_num = int(single_season_match.group(1))
+
+
+            # Create a single video entry for this "season pack" or "episode"
+            # The video.id must be unique across all videos and is what Stremio will use to request streams
+            video_entry = {
+                "id": item['id'], # This is the unique ID for the stream request
+                "title": item['title'], # The full title of the episode/season pack
+                "released": item.get('pub_date', '').split('T')[0] if item.get('pub_date') else '', # Stremio expects 'YYYY-MM-DD'
+                "season": season_num,
+                "episode": episode_num
+            }
+
             meta = {
-                "id": item['id'], # Use the stremio_id as the unique ID
-                "type": "series", # Or 'movie' if the RSS feed contains movies
-                "name": item['title'],
+                "id": item['id'], # This is the unique ID for the series itself
+                "type": "series",
+                "name": item['title'], # The full name of the series (e.g., "Hai Junoon Dream Dare Dominate S01 EP(01-20)")
                 "poster": item['poster'],
-                "posterShape": "regular", # or 'landscape'
-                "description": item.get('quality_details', 'No description available.'), # Use full quality details for description
+                "posterShape": "regular",
+                "description": item.get('quality_details', 'No description available.'),
                 "releaseInfo": item.get('year', ''),
                 "genres": ["Tamil Shows", "Web Series"],
-                "runtime": "" # Not available from RSS, but could be added if parsed
+                "runtime": "",
+                "videos": [video_entry] # Add the video array here
             }
             metas.append(meta)
     
     # Sort by publication date (most recent first)
-    # Assuming 'pub_date' is stored as an ISO format string in Redis.
     metas.sort(key=lambda x: x.get('pub_date', '0000-01-01T00:00:00Z'), reverse=True)
 
+    logger.debug(f"Returning catalog with {len(metas)} items. Example meta: {json.dumps(metas[0] if metas else {}, indent=2)}")
     return jsonify({"metas": metas})
 
 
