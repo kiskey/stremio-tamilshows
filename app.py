@@ -434,17 +434,43 @@ class RSSParser:
                     # Split title_full by the LAST '[' to separate base title from potential quality/extra info
                     title_parts_split_by_last_bracket = cleaned_title_full.rsplit('[', 1)
                     
+                    # --- More robust quality_details_raw extraction ---
+                    # 1. Try to extract from description_html first, as it often contains the full string
+                    temp_desc_soup = BeautifulSoup(description_html, 'html.parser')
+                    raw_description_text = temp_desc_soup.get_text(separator=' ', strip=True)
+
+                    # Look for patterns that typically follow "Source: 1TamilBlasters - "
+                    # or are just a comprehensive quality string
+                    # Example: "Source: 1TamilBlasters - Tamil + Telugu + Hindi] - x264 -2.2GB - ESub"
+                    # Example: "1080p HD AVC UNTOUCHED - x264 - AAC - 2.1GB" (from Office log)
+                    
+                    # Try to capture the main quality/language/codec block
+                    # This pattern is more flexible to catch various starting points
+                    quality_desc_match = re.search(r'(?:Source:\s*1TamilBlasters\s*-\s*)?(.*?)(?:\]\s*-\s*ESubs?)?$', raw_description_text, re.IGNORECASE)
+                    if quality_desc_match:
+                        quality_details_raw = quality_desc_match.group(1).strip()
+                        # Remove common trailing suffixes like " - ESub" or " -ESubs"
+                        quality_details_raw = re.sub(r'\s*-\s*ESubs?$', '', quality_details_raw, flags=re.IGNORECASE).strip()
+                        # Also remove any trailing brackets from the extracted string
+                        quality_details_raw = re.sub(r'\]\s*$', '', quality_details_raw).strip()
+                    else:
+                        quality_details_raw = ""
+
+                    # 2. Fallback to bracketed info from title_full if description_html didn't yield much
+                    # This is a good fallback, but ensure it's not empty
+                    if not quality_details_raw and len(title_parts_split_by_last_bracket) > 1:
+                        potential_raw = title_parts_split_by_last_bracket[1].rstrip(']').strip()
+                        if potential_raw: # Only use if it's not an empty string
+                            quality_details_raw = potential_raw
+
+
+                    # --- Continue title parsing ---
                     if len(title_parts_split_by_last_bracket) > 1:
-                        quality_details_raw = title_parts_split_by_last_bracket[1].rstrip(']').strip()
-                        # Clean the title candidate, removing any trailing hyphens or spaces
                         title_candidate = title_parts_split_by_last_bracket[0].strip()
                         title_candidate = re.sub(r'[-\s]+$', '', title_candidate).strip() # Remove trailing hyphens/spaces
-
                     else:
-                        title_candidate = cleaned_title_full.strip()
-                        quality_details_raw = "" # No quality details found in brackets
-
-
+                        title_candidate = cleaned_title_full.strip() # Use the fully cleaned title if no brackets
+                        
                     # Extract year (if present) from title_candidate
                     year_match = re.search(r"\((\d{4})\)", title_candidate)
                     if year_match:
@@ -470,38 +496,53 @@ class RSSParser:
                     # This section needs to produce a clean string without "Tamil + Telugu" if it's not a quality.
                     # It should prioritize resolutions, then HDRip/HD, then other meaningful quality indicators.
                     
-                    temp_quality_details = quality_details_raw
-                    # If quality_details_raw starts with languages in brackets, remove them for quality extraction
+                    temp_quality_for_extraction = quality_details_raw # Use the robustly extracted quality_details_raw
+                    
+                    # Remove language part for cleaner quality extraction
                     # e.g., "[Tamil + Telugu + Hindi] - x264 - 2.2GB" -> "x264 - 2.2GB"
-                    lang_at_start_match = re.match(r'\[([^\]]+)\]\s*-\s*', temp_quality_details)
-                    if lang_at_start_match:
-                        temp_quality_details = temp_quality_details[len(lang_at_start_match.group(0)):].strip()
+                    temp_quality_for_extraction = re.sub(r'^\[[^\]]+\]\s*-\s*', '', temp_quality_for_extraction).strip()
 
-                    # Re-run existing logic for concise_quality_elements with the cleaned temp_quality_details
                     concise_quality_elements = []
-                    resolution_match = re.search(r'(\d+p|4K)', temp_quality_details, re.IGNORECASE)
+                    # Resolutions (4K, 1080p, 720p, 480p) - prioritize full word match
+                    resolution_match = re.search(r'(\d+p|4K)', temp_quality_for_extraction, re.IGNORECASE)
                     if resolution_match:
                         concise_quality_elements.append(resolution_match.group(1).upper())
                     
-                    if re.search(r'HDRip', temp_quality_details, re.IGNORECASE):
+                    # General quality terms (HD, HDRip)
+                    if re.search(r'HDRip', temp_quality_for_extraction, re.IGNORECASE):
                         concise_quality_elements.append('HDRip')
-                    elif re.search(r'HD', temp_quality_details, re.IGNORECASE):
+                    elif re.search(r'HD', temp_quality_for_extraction, re.IGNORECASE):
                         concise_quality_elements.append('HD')
                     
+                    # Video Codec (x264, H.264, H.265, HEVC, AVC)
+                    video_codec_match = re.search(r'(x264|H\.264|H\.265|HEVC|AVC)', temp_quality_for_extraction, re.IGNORECASE)
+                    if video_codec_match:
+                        video_codec = video_codec_match.group(1).upper()
+                    
+                    # Audio Languages (e.g., [Tam + Mal + Tel + Hin + Kan]) - extracted from original quality_details_raw
+                    language_match = re.search(r'\[([^\]]+)\]', quality_details_raw) # Use original raw for languages
+                    if language_match:
+                        languages_str = language_match.group(1).strip()
+                        audio_languages = [lang.strip() for lang in re.split(r'\s*\+\s*', languages_str)]
+                    
+                    # File Size (e.g., 16.5GB, 800MB)
+                    size_match = re.search(r'(\d+(\.\d+)?(GB|MB))', temp_quality_for_extraction, re.IGNORECASE)
+                    if size_match:
+                        file_size = size_match.group(1).upper()
+
                     if concise_quality_elements:
                         extracted_quality_for_name = " ".join(concise_quality_elements)
-                    elif temp_quality_details: 
-                        # Fallback to first segment if no specific keywords, but ensure it's not just "x264" or "DD5.1"
-                        parts = [p.strip() for p in temp_quality_details.split('-') if p.strip()]
-                        # Filter out known non-quality indicators like codecs, audio formats
+                    elif temp_quality_for_extraction: 
+                        parts = [p.strip() for p in temp_quality_for_extraction.split('-') if p.strip()]
                         meaningful_parts = [p for p in parts if not re.match(r'(x\d+|H\.264|H\.265|HEVC|AVC|DD\d+\.\d+|AAC|AC3)', p, re.IGNORECASE)]
                         if meaningful_parts:
                             extracted_quality_for_name = meaningful_parts[0]
                         else:
-                            extracted_quality_for_name = "Unknown Quality" # If only non-quality parts remain
+                            extracted_quality_for_name = "Standard Quality" # If only non-quality parts remain
                     else:
-                        extracted_quality_for_name = "Unknown Quality"
+                        extracted_quality_for_name = "Standard Quality" # More descriptive default
 
+                    # description_quality should still reflect the full raw details for verbose description
                     description_quality = quality_details_raw if quality_details_raw else "No additional quality details available."
 
                     # --- Logic for parsing poster URL - REFINED AND MORE ROBUST ---
@@ -754,18 +795,18 @@ def meta(type, id):
 
             # --- Constructing stream.name and stream.title ---
             stream_name_parts = ["TamilBlasters"]
-            if quality_for_name and quality_for_name != "Unknown Quality":
+            if quality_for_name and quality_for_name != "Standard Quality": # Changed condition
                 stream_name_parts.append(quality_for_name)
-            stream_name = " - ".join(stream_name_parts) # Changed to " - " for cleaner name
+            stream_name = " - ".join(stream_name_parts)
 
-            stream_title_parts = [item.get('title', 'N/A')] # Use cleaned title from item
+            stream_title_parts = [item.get('title', 'N/A')]
             if audio_languages:
                 stream_title_parts.append(f"{', '.join(audio_languages)}")
             if video_codec:
                 stream_title_parts.append(video_codec)
             if file_size:
                 stream_title_parts.append(file_size)
-            stream_title = " | ".join(filter(None, stream_title_parts)) # Join with " | " and filter empty parts
+            stream_title = " | ".join(filter(None, stream_title_parts))
 
             embedded_stremio_streams.append({
                 "name": stream_name, 
@@ -833,9 +874,9 @@ def stream(type, stremio_id):
 
             # --- Constructing stream.name and stream.title ---
             stream_name_parts = ["TamilBlasters"]
-            if quality_for_name and quality_for_name != "Unknown Quality":
+            if quality_for_name and quality_for_name != "Standard Quality": # Changed condition
                 stream_name_parts.append(quality_for_name)
-            stream_name = " - ".join(stream_name_parts) # Changed to " - " for cleaner name
+            stream_name = " - ".join(stream_name_parts)
 
             # Use the original title from the item in Redis
             item_data = redis_client.get_catalog_item(stremio_id)
@@ -848,7 +889,7 @@ def stream(type, stremio_id):
                 stream_title_parts.append(video_codec)
             if file_size:
                 stream_title_parts.append(file_size)
-            stream_title = " | ".join(filter(None, stream_title_parts)) # Join with " | " and filter empty parts
+            stream_title = " | ".join(filter(None, stream_title_parts))
 
             stremio_stream = {
                 "name": stream_name, 
@@ -863,8 +904,8 @@ def stream(type, stremio_id):
     logger.debug(f"Returning stream response for '{stremio_id}': {json.dumps(stremio_streams, indent=2)}")
 
     # Sort streams by quality (e.g., 1080p before 720p)
-    quality_order = {'4K': 5, '2160P': 4, '1080P': 3, '720P': 2, '480P': 1} 
-    stremio_streams.sort(key=lambda x: quality_order.get(re.search(r'(\d+P|4K)', x['name'].upper())[0] if re.search(r'(\d+P|4K)', x['name'].upper()) else '', 0), reverse=True)
+    quality_order = {'4K': 5, '2160P': 4, '1080P': 3, '720P': 2, '480P': 1, 'STANDARD QUALITY': 0} # Added Standard Quality
+    stremio_streams.sort(key=lambda x: quality_order.get(re.search(r'(\d+P|4K|STANDARD QUALITY)', x['name'].upper())[0] if re.search(r'(\d+P|4K|STANDARD QUALITY)', x['name'].upper()) else '', 0), reverse=True)
 
 
     return jsonify({"streams": stremio_streams})
