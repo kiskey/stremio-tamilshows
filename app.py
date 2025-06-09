@@ -616,26 +616,28 @@ class RSSParser:
                     logger.error(f"Error parsing HTML description for entry '{entry.get('title', 'N/A')}': {bs_e}. Raw description (first 500 chars): {description_html[:500]}...")
                     continue # Skip this entry if description HTML is unparseable
 
-                # Find all potential torrent links within the entry's description
-                # Explicitly search for 'a' tags with class 'ipsAttachLink' AND data-fileext='torrent'
-                torrent_links = soup_desc.find_all('a', class_='ipsAttachLink', attrs={'data-fileext': 'torrent'})
+                # Find all potential file attachment links within the entry's description
+                # Filter for links whose text content ends with '.torrent'
+                all_ips_attach_links = soup_desc.find_all('a', class_='ipsAttachLink')
                 
-                # Log detailed info if no torrent links are found for this entry
-                if not torrent_links:
-                    potential_links_raw = soup_desc.find_all('a', class_='ipsAttachLink')
-                    logger.debug(f"Found {len(potential_links_raw)} ipsAttachLink tags for entry '{entry.get('title', 'N/A')}'.")
-                    for link_tag in potential_links_raw:
-                        # Log why a potential link was skipped if it doesn't have the correct data-fileext
-                        if not (link_tag.has_attr('data-fileext') and link_tag['data-fileext'] == 'torrent'):
-                            logger.debug(f"Skipping ipsAttachLink tag for entry '{entry.get('title', 'N/A')}' because data-fileext is not 'torrent' or missing. Tag: {link_tag.prettify(formatter=None)}")
+                torrent_links_to_process = []
+                for link_tag in all_ips_attach_links:
+                    link_text = link_tag.string
+                    if link_text and link_text.strip().lower().endswith('.torrent'):
+                        torrent_links_to_process.append(link_tag)
+                        logger.debug(f"Identified torrent link by filename ending in .torrent: {link_text.strip()}")
+                    else:
+                        logger.debug(f"Skipping ipsAttachLink tag for entry '{entry.get('title', 'N/A')}' because its text '{link_text.strip() if link_text else 'N/A'}' does not end with '.torrent'. Tag: {link_tag.prettify(formatter=None)}")
 
-                    logger.warning(f"No torrent file links with data-fileext='torrent' found in RSS entry: {entry.get('title', 'N/A')}. Complete description (first 1000 chars): {description_html[:1000]}")
+
+                if not torrent_links_to_process:
+                    logger.warning(f"No torrent file links (ending in .torrent) found in RSS entry: {entry.get('title', 'N/A')}. Complete description (first 1000 chars): {description_html[:1000]}")
                     continue
 
                 # Find all magnet links once for this entry to associate with torrent files later
                 all_magnet_links_in_desc = soup_desc.find_all('a', class_='magnet-plugin', href=re.compile(r'magnet:\?xt=urn:btih:'))
 
-                for torrent_link_tag in torrent_links:
+                for torrent_link_tag in torrent_links_to_process:
                     # Initialize variables for this specific torrent link to prevent NameError
                     title = "Unknown Title"
                     year = ""
