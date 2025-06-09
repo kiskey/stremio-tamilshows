@@ -12,7 +12,7 @@ import requests
 import feedparser
 from bs4 import BeautifulSoup
 import redis
-from urllib.parse import unquote_plus # Import unquote_plus from urllib.parse
+from urllib.parse import unquote_plus, parse_qs # Import unquote_plus and parse_qs from urllib.parse
 
 # --- Configuration from Environment Variables ---
 # Initial RSS Feed URL - This will be updated dynamically
@@ -880,13 +880,12 @@ def catalog(type, id, extra=None):
     skip = 0
     if extra:
         try:
-            extra_dict = json.loads(extra)
-            skip = int(extra_dict.get('skip', 0))
-        except json.JSONDecodeError:
-            logger.warning(f"Failed to decode extra parameter: {extra}. Assuming skip=0.")
-            skip = 0
+            # Parse the query string parameters from 'extra'
+            extra_params = parse_qs(extra)
+            # The 'skip' parameter will be a list, so take the first element
+            skip = int(extra_params.get('skip', ['0'])[0])
         except ValueError:
-            logger.warning(f"Invalid skip value in extra parameter: {extra_dict.get('skip')}. Assuming skip=0.")
+            logger.warning(f"Invalid skip value in extra parameter: {extra}. Assuming skip=0.")
             skip = 0
     
     limit = 100 # Stremio's standard page size for catalogs
@@ -1047,6 +1046,8 @@ def stream(type, id):
                 continue
 
             info_hash_match = re.search(r'btih:([^&]+)', magnet_uri)
+                # Ensure the magnet URI is properly URL-decoded before extracting infoHash
+            info_hash_match = re.search(r'btih:([^&]+)', unquote_plus(magnet_uri))
             info_hash = info_hash_match.group(1) if info_hash_match else None
 
             if not info_hash:
