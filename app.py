@@ -712,7 +712,7 @@ def manifest():
                 "id": "tamil_shows_catalog",
                 "name": "Tamil Shows",
                 "extraRequired": [],
-                "extraSupported": ["search"]
+                "extraSupported": ["search", "skip"] # Added "skip" for pagination
             }
         ],
         "configurable": True,
@@ -730,16 +730,39 @@ def manifest():
 @app.route('/catalog/<type>/<id>/<extra>.json')
 def catalog(type, id, extra=None):
     """
-    Returns the catalog of Tamil shows.
+    Returns the catalog of Tamil shows with pagination support.
     Stremio expects 'meta' objects for each item.
     """
     if type != "movie" or id != "tamil_shows_catalog": 
         return jsonify({"metas": []})
 
-    all_items = redis_client.get_all_catalog_items()
-    metas = []
+    # Parse extra parameters for skip (pagination)
+    # Stremio sends extra parameters as a URL-encoded JSON string or similar
+    # For extra parameter parsing, we expect a format like: {"skip": "0", "search": "query"}
+    skip = 0
+    if extra:
+        try:
+            extra_dict = json.loads(extra)
+            skip = int(extra_dict.get('skip', 0))
+        except json.JSONDecodeError:
+            logger.warning(f"Failed to decode extra parameter: {extra}. Assuming skip=0.")
+            skip = 0
+        except ValueError:
+            logger.warning(f"Invalid skip value in extra parameter: {extra_dict.get('skip')}. Assuming skip=0.")
+            skip = 0
+    
+    limit = 100 # Stremio's standard page size for catalogs
 
-    for item in all_items:
+    all_items = redis_client.get_all_catalog_items()
+    
+    # Sort all items by publication date (most recent first) before applying pagination
+    all_items.sort(key=lambda x: x.get('pub_date', '0000-01-01T00:00:00Z'), reverse=True)
+
+    # Apply pagination by slicing the sorted list
+    paginated_items = all_items[skip:skip + limit]
+
+    metas = []
+    for item in paginated_items: # Iterate over paginated items
         # Check for 'poster_thumbnail' as the primary poster for catalog
         if 'title' in item and 'poster_thumbnail' in item: 
             meta = {
@@ -755,10 +778,7 @@ def catalog(type, id, extra=None):
             }
             metas.append(meta)
     
-    # Sort by publication date (most recent first)
-    metas.sort(key=lambda x: x.get('pub_date', '0000-01-01T00:00:00Z'), reverse=True)
-
-    logger.debug(f"Returning catalog with {len(metas)} items. Example meta: {json.dumps(metas[0] if metas else {}, indent=2)}")
+    logger.debug(f"Returning catalog for skip={skip}, limit={limit} with {len(metas)} items. Example meta: {json.dumps(metas[0] if metas else {}, indent=2)}")
     return jsonify({"metas": metas})
 
 
