@@ -412,9 +412,8 @@ class RSSParser:
                     description_html = entry.description
                     pub_date_str = entry.published
                     
-                    # --- FIX START: Initialize pub_date_dt here ---
+                    # --- Initialize pub_date_dt here ---
                     pub_date_dt = datetime.now() # Initialize with current datetime as a fallback
-                    # --- FIX END ---
 
                     # Initialize other variables
                     title_base = "" 
@@ -491,10 +490,11 @@ class RSSParser:
                         file_size = size_match.group(1).upper()
 
                     extracted_quality_for_name = " ".join(concise_quality_elements)
+                    # Fallback: if no specific resolution/quality was found but raw data exists, take the first segment
                     if not extracted_quality_for_name and quality_details_raw:
                         extracted_quality_for_name = quality_details_raw.split('-')[0].strip()
                     if not extracted_quality_for_name:
-                        extracted_quality_for_name = "Unknown"
+                        extracted_quality_for_name = "Unknown Quality" # Final fallback
 
 
                     description_quality = quality_details_raw if quality_details_raw else "No description available."
@@ -542,6 +542,7 @@ class RSSParser:
                         pub_date_dt = datetime.strptime(pub_date_str, '%a, %d %b %Y %H:%M:%S %z')
                     except ValueError:
                         try:
+                            # Try parsing without timezone for systems where %z might not be supported or is missing
                             pub_date_dt = datetime.strptime(pub_date_str, '%a, %d %b %Y %H:%M:%S %Z')
                         except ValueError:
                             logger.warning(f"Could not parse pubDate '{pub_date_str}' for '{title_full}'. Using current time.")
@@ -575,12 +576,10 @@ class RSSParser:
                             'file_size': file_size,
                             'poster': poster_url,
                             'magnet_uri': magnet_uri,
-                            'pub_date': pub_date_dt, # pub_date_dt is now guaranteed to be defined
+                            'pub_date': pub_date_dt, 
                             'original_link': link
                         })
                 except Exception as item_e:
-                    # Now pub_date_dt will always be defined here, even if it's the initial datetime.now()
-                    # You can safely include it in the log message.
                     logger.error(f"Error parsing RSS item: {item_e} (Title: {entry.get('title', 'N/A')}, PubDate String: {entry.get('published', 'N/A')})")
             logger.info(f"Successfully parsed {len(items_data)} items from RSS feed.")
         except requests.exceptions.RequestException as e:
@@ -656,7 +655,7 @@ def catalog(type, id, extra=None):
             metas.append(meta)
     
     # Sort by publication date (most recent first)
-    metas.sort(key=lambda x: x.get('pub_date', '0000-01-01T00:00:00Z'), reverse=True)
+    metas.sort(key=lambda x: x.get('pub_date', '0000-01-01T00:00:00:00Z'), reverse=True) # Ensure pub_date is always string for comparison
 
     logger.debug(f"Returning catalog with {len(metas)} items. Example meta: {json.dumps(metas[0] if metas else {}, indent=2)}")
     return jsonify({"metas": metas})
@@ -697,7 +696,6 @@ def stream(type, stremio_id):
     """
     Returns stream links for a given Stremio ID.
     """
-    # stremio_id will now be our custom 'tamilshows:' ID
     if type != "movie": 
         return jsonify({"streams": []})
 
@@ -708,7 +706,7 @@ def stream(type, stremio_id):
         magnet_uri = s_data.get('magnet_uri')
         
         # Retrieve parsed quality details from Redis
-        quality_for_name = s_data.get('quality_for_name') or "Unknown Quality" 
+        quality_for_name = s_data.get('quality_for_name') 
         description_quality = s_data.get('quality_details') or "No description available."
         
         # Parse stored JSON strings back to Python objects
@@ -735,28 +733,34 @@ def stream(type, stremio_id):
                 stremio_sources.append(f"dht:{info_hash}")
 
             if info_hash: # Only add stream if we successfully got an infoHash
-                # --- Constructing stream.title with emojis ---
-                title_parts = []
-                if audio_languages:
-                    title_parts.append(f"🔊 {', '.join(audio_languages)}")
-                if video_codec:
-                    title_parts.append(f"📺 {video_codec}")
-                if file_size:
-                    title_parts.append(f"📦 {file_size}")
+                # --- Constructing stream.title and stream.name more clearly ---
+                # name: Concise display in stream list (e.g., "TamilBlasters 1080p")
+                # title: More detailed info shown below the name
+                # description: Full raw quality string or extended details
                 
-                # Combine original title with new metadata parts
-                stream_title_metadata = " | ".join(title_parts)
-                final_stream_title = f"{s_data.get('title', 'N/A')} ({quality_for_name})"
-                if stream_title_metadata:
-                    final_stream_title += f" - {stream_title_metadata}"
+                stream_name_parts = ["TamilBlasters"]
+                if quality_for_name and quality_for_name != "Unknown Quality": # Check against the string literal
+                    stream_name_parts.append(quality_for_name)
+                stream_name = " ".join(stream_name_parts)
+
+                stream_title_parts = [s_data.get('title', 'N/A')]
+                if audio_languages:
+                    stream_title_parts.append(f"({', '.join(audio_languages)})")
+                if video_codec:
+                    stream_title_parts.append(video_codec)
+                if file_size:
+                    stream_title_parts.append(file_size)
+                
+                # Removed emojis from title for compatibility, moved to description
+                stream_title = " ".join(stream_title_parts)
 
 
                 stremio_stream = {
-                    "name": f"TamilBlasters-{quality_for_name}", # Concise quality for stream name
-                    "description": f"Source: 1TamilBlasters - {description_quality}", # Full details for description
+                    "name": stream_name, 
+                    "description": f"Source: 1TamilBlasters - {description_quality}", 
                     "infoHash": info_hash,
-                    "sources": stremio_sources, # This now contains both tracker and DHT sources
-                    "title": final_stream_title # Title including concise quality and emoji metadata
+                    "sources": stremio_sources, 
+                    "title": stream_title
                 }
                 stremio_streams.append(stremio_stream)
                 logger.debug(f"Returning stream object for '{stremio_id}': {json.dumps(stremio_stream, indent=2)}")
