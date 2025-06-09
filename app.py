@@ -455,9 +455,141 @@ class RSSParser:
         self.domain_resolver = domain_resolver
         self.tmdb_manager = tmdb_manager # Store tmdb_manager
 
+    def _parse_torrent_filename(self, filename_str):
+        """
+        Parses a torrent filename string to extract title, year, and stream details.
+        Example filename: "www.1TamilBlasters.fi - Cooku With Comali (2025) S06E11 [Tamil - 1080p HD AVC UNTOUCHED - x264 - AAC - 1.6GB].mkv.torrent"
+        """
+        title = "Unknown Title"
+        year = ""
+        quality_details_raw = "N/A"
+        extracted_quality_for_name = "Standard Quality"
+        audio_languages = []
+        video_codec = ""
+        file_size = ""
+
+        working_filename = filename_str.strip()
+
+        # 1. Remove common website prefixes (e.g., "www.1TamilBlasters.fi - ")
+        working_filename = re.sub(r'^(?:www\.\w+\.[\w/]+\s*-\s*)', '', working_filename, flags=re.IGNORECASE).strip()
+
+        # 2. Extract year first (e.g., "(2025)") and remove it
+        year_match = re.search(r"\b\((\d{4})\)\b", working_filename)
+        if year_match:
+            year = year_match.group(1)
+            working_filename = working_filename.replace(year_match.group(0), ' ').strip()
+
+        # 3. Extract the main quality/info block in brackets (e.g., "[Tamil - 1080p HD AVC UNTOUCHED - x264 - AAC - 1.6GB]")
+        # This regex looks for the last square bracket block at the end of the string, before file extension
+        quality_block_match = re.search(r'\[([^\]]+?)(?:-\s*ESubs?)?\](?=\.[a-zA-Z0-9]+(?:(?:\.mkv|\.mp4|\.avi|\.webm|\.torrent)$)?$)', working_filename, re.IGNORECASE)
+        if quality_block_match:
+            quality_details_raw = quality_block_match.group(1).strip()
+            # Remove the matched quality block from the working filename
+            working_filename = working_filename.replace(quality_block_match.group(0), ' ').strip()
+        
+        # 4. Remove season/episode patterns, as they often appear before the quality block or in the base title
+        season_episode_patterns = [
+            r'\bS(?:eason)?\s*\d+\s*E(?:pisode)?\s*\d+(?:-\d+)?\b', # S01E01, Season 1 Episode 1
+            r'\bS(?:eason)?\s*\d+\b',                             # S01, Season 1
+            r'\bEP\s*\(\d+(?:-\d+)?\)\b',                         # EP(01-10)
+            r'\bE(?:pisode)?\s*\d+(?:-\d+)?\b',                   # E01, Episode 01-06
+            r'\bPart\s+\d+\b',                                    # Part 1
+            r'\bVol(?:\.|ume)?\s+\d+\b',                          # Vol. 1, Volume 2
+            r'\b\d+\s*Episodes?\b',                               # 10 Episodes
+            r'\bComplete\s*Season(?:s)?\b',                       # Complete Season, Complete Seasons
+            r'\bCollection(?:\s+\d+)?\b',                         # Collection, Collection 1
+            r'\b(?:Mini[\-.\s]?)Series\b',                        # Mini-Series
+        ]
+        for pattern in season_episode_patterns:
+            working_filename = re.sub(pattern, ' ', working_filename, flags=re.IGNORECASE).strip()
+
+        # 5. Clean up the main title
+        # Remove common separators and consolidate spaces
+        title = re.sub(r'[_\-.]+', ' ', working_filename).strip()
+        # Remove any remaining non-alphanumeric except spaces
+        title = re.sub(r'[^a-zA-Z0-9\s]+', ' ', title).strip()
+        # Consolidate multiple spaces
+        title = re.sub(r'\s+', ' ', title).strip()
+
+        # Fallback if title is still empty
+        title = title or "Unknown Title"
+
+        # If year was not found in parentheses, check again if it's just a 4-digit number in the remaining title
+        if not year:
+            temp_year_match = re.search(r'\b(\d{4})\b', title)
+            if temp_year_match:
+                year = temp_year_match.group(1)
+                title = title.replace(temp_year_match.group(0), '').strip() # Remove year from title
+                title = re.sub(r'\s+', ' ', title).strip() # Clean spaces after removal
+
+        # --- Parse details from quality_details_raw ---
+        temp_quality_for_extraction = quality_details_raw
+
+        # Languages (e.g., "[Tamil + Telugu + Hindi + Kor]")
+        language_match = re.search(r'\[([^\]]+?)\]', temp_quality_for_extraction)
+        if language_match:
+            languages_str = language_match.group(1).strip()
+            audio_languages = [lang.strip() for lang in re.split(r'\s*\+\s*', languages_str)]
+            temp_quality_for_extraction = temp_quality_for_extraction.replace(language_match.group(0), '').strip()
+            temp_quality_for_extraction = re.sub(r'[-\s]+$', '', temp_quality_for_extraction).strip()
+
+        # Video Codec
+        video_codec_match = re.search(r'(x264|H\.264|H\.265|HEVC|AVC|VP9|AV1)', temp_quality_for_extraction, re.IGNORECASE)
+        if video_codec_match:
+            video_codec = video_codec_match.group(1).upper()
+
+        # File Size
+        size_match = re.search(r'(\d+(?:\.\d+)?(?:GB|MB))', temp_quality_for_extraction, re.IGNORECASE)
+        if size_match:
+            file_size = size_match.group(1).upper()
+
+        # Concise Quality for Name (e.g., "1080p HDRip")
+        concise_quality_elements = []
+        resolution_match = re.search(r'(\d+p|4K)', temp_quality_for_extraction, re.IGNORECASE)
+        if resolution_match:
+            concise_quality_elements.append(resolution_match.group(1).upper())
+        
+        # Source/Rip type
+        if re.search(r'HDRip', temp_quality_for_extraction, re.IGNORECASE):
+            concise_quality_elements.append('HDRip')
+        elif re.search(r'WEB-DL|WebDL', temp_quality_for_extraction, re.IGNORECASE):
+            concise_quality_elements.append('WEB-DL')
+        elif re.search(r'BluRay|BDRip', temp_quality_for_extraction, re.IGNORECASE):
+            concise_quality_elements.append('BluRay')
+        elif re.search(r'HD', temp_quality_for_extraction, re.IGNORECASE): # General HD, less specific
+            concise_quality_elements.append('HD')
+        
+        if concise_quality_elements:
+            extracted_quality_for_name = " ".join(concise_quality_elements).strip()
+        else: # Fallback for quality if specific terms not found
+            # Attempt to grab any remaining significant terms, excluding codecs/audio
+            parts = [p.strip() for p in temp_quality_for_extraction.split('-') if p.strip()]
+            meaningful_parts = [p for p in parts if not re.match(r'(x\d+|H\.264|H\.265|HEVC|AVC|DD\d+\.\d+|AAC|AC3|DTS)', p, re.IGNORECASE)]
+            if meaningful_parts:
+                extracted_quality_for_name = meaningful_parts[0]
+            else:
+                extracted_quality_for_name = "Standard Quality"
+
+        # Ensure all extracted values are strings (or list for audio_languages)
+        year = year or ""
+        quality_details_raw = quality_details_raw or ""
+        video_codec = video_codec or ""
+        file_size = file_size or ""
+
+        return {
+            'title': title,
+            'year': year,
+            'quality_details_raw': quality_details_raw,
+            'quality_for_name': extracted_quality_for_name,
+            'audio_languages': audio_languages,
+            'video_codec': video_codec,
+            'file_size': file_size
+        }
+
     def parse_rss_feed(self, feed_url):
         """
         Fetches and parses the RSS feed from the given URL.
+        Iterates through torrent links in description_html to extract item data.
         Returns a list of dictionaries, each representing a parsed item.
         """
         items_data = []
@@ -472,300 +604,167 @@ class RSSParser:
                 logger.warning(f"RSS feed parsing error (bozo bit set): {feed.bozo_exception}")
 
             for entry in feed.entries:
-                # Initialize variables at the start of each loop iteration to prevent NameError
-                title = "Unknown Title"
-                year = ""
-                base_stremio_id = ""
-                quality_details_raw = "N/A"
-                extracted_quality_for_name = "Standard Quality"
-                audio_languages = []
-                video_codec = ""
-                file_size = ""
-                catalog_poster_url = "https://placehold.co/185x278/000000/FFFFFF?text=No+Poster"
-                meta_poster_url = "https://placehold.co/500x750/000000/FFFFFF?text=No+Poster"
-                magnet_uri = ""
-                pub_date_dt = datetime.now()
+                description_html = entry.description
+                soup_desc = BeautifulSoup(description_html, 'html.parser')
 
-                try:
-                    title_full = entry.title
-                    link = entry.link
-                    description_html = entry.description
-                    pub_date_str = entry.published
-                    
-                    # Parse pubDate to datetime object early, for logging even if other things fail
+                # Find all torrent links within the entry's description
+                torrent_links = soup_desc.find_all('a', class_='ipsAttachLink', attrs={'data-fileext': 'torrent'})
+
+                if not torrent_links:
+                    logger.warning(f"No torrent links found in RSS entry: {entry.get('title', 'N/A')}. Skipping.")
+                    continue
+
+                for torrent_link_tag in torrent_links:
+                    # Initialize variables for this specific torrent link to prevent NameError
+                    # These will be populated by _parse_torrent_filename or other logic
+                    title = "Unknown Title"
+                    year = ""
+                    base_stremio_id = ""
+                    quality_details_raw = "N/A"
+                    extracted_quality_for_name = "Standard Quality"
+                    audio_languages = []
+                    video_codec = ""
+                    file_size = ""
+                    catalog_poster_url = "https://placehold.co/185x278/000000/FFFFFF?text=No+Poster"
+                    meta_poster_url = "https://placehold.co/500x750/000000/FFFFFF?text=No+Poster"
+                    magnet_uri = ""
+                    pub_date_dt = datetime.now() # Fallback for pub_date
+
                     try:
-                        pub_date_dt = datetime.strptime(pub_date_str, '%a, %d %b %Y %H:%M:%S %z')
-                    except ValueError:
-                        try:
-                            # Fallback for different timezone format
-                            pub_date_dt = datetime.strptime(pub_date_str, '%a, %d %b %Y %H:%M:%S %Z')
-                        except ValueError:
-                            logger.warning(f"Could not parse pubDate '{pub_date_str}' for '{title_full}'. Attempting from parsed_tuple.")
-                            if entry.published_parsed:
-                                try:
-                                    # Convert time.struct_time to datetime object
-                                    pub_date_dt = datetime.fromtimestamp(time.mktime(entry.published_parsed))
-                                except Exception:
-                                    logger.warning(f"Could not convert parsed_tuple to datetime for '{title_full}'. Using current time.")
-                                    pub_date_dt = datetime.now()
-                            else:
-                                pub_date_dt = datetime.now()
-
-
-                    # --- REFINED Logic for parsing concise title and year for catalog display ---
-                    raw_entry_title = entry.title
-                    working_title_for_base = raw_entry_title # Start with a working copy
-
-                    # 1. Extract year from anywhere in the title, and then remove it to simplify
-                    year_match = re.search(r"\b\((\d{4})\)\b", working_title_for_base) 
-                    if year_match:
-                        year = year_match.group(1)
-                        # Replace the year and its parentheses with a space to help subsequent cleaning
-                        working_title_for_base = working_title_for_base.replace(year_match.group(0), ' ').strip()
-                    
-                    # 2. Remove specific season and episode indicators FIRST, as they are very structured
-                    season_episode_patterns = [
-                        r'\bS(?:eason)?\s*\d+\s*E(?:pisode)?\s*\d+(?:-\d+)?\b', # S01E01, Season 1 Episode 1
-                        r'\bS(?:eason)?\s*\d+\b',                             # S01, Season 1
-                        r'\bEP\s*\(\d+(?:-\d+)?\)\b',                         # EP(01-10)
-                        r'\bE(?:pisode)?\s*\d+(?:-\d+)?\b',                   # E01, Episode 01-06
-                        r'\bPart\s+\d+\b',                                    # Part 1
-                        r'\bVol(?:\.|ume)?\s+\d+\b',                          # Vol. 1, Volume 2
-                        r'\b\d+\s*Episodes?\b',                               # 10 Episodes
-                        r'\bComplete\s*Season(?:s)?\b',                       # Complete Season, Complete Seasons
-                        r'\bCollection(?:\s+\d+)?\b',                         # Collection, Collection 1
-                        r'\b(?:Mini[\-.\s]?)Series\b',                        # Mini-Series
-                    ]
-                    for pattern in season_episode_patterns:
-                        working_title_for_base = re.sub(pattern, ' ', working_title_for_base, flags=re.IGNORECASE).strip()
-
-                    # 3. Remove ANY content inside square brackets, as it's almost always metadata after title
-                    # This is aggressive but necessary for varied RSS formats
-                    working_title_for_base = re.sub(r'\[.*?\]', ' ', working_title_for_base).strip()
-                    
-                    # 4. Remove common quality/codec/size terms that might appear without brackets or at the end
-                    general_quality_terms = [
-                        r'\b(?:4K|2160p|1080p|720p|480p)\b',
-                        r'\b(?:HDRip|WEB-DL|BluRay|BDRip|DVDRip|WebRip)\b',
-                        r'\b(?:x264|H\.264|H\.265|HEVC|AVC|VP9|AV1)\b',
-                        r'\b(?:DD\d+\.\d+|AC3|AAC|DTS|FLAC|MP3)\b',
-                        r'\b\d+(?:\.\d+)?(?:GB|MB|KB)\b', # File size
-                        r'\b(?:Dual Audio|Multi Audio|Org Audio|ESubs?)\b',
-                        r'\bUntouched\b', # Specific term found in example
-                        r'\bHQ\b' # "HQ HDRip" from example
-                    ]
-                    for term in general_quality_terms:
-                        working_title_for_base = re.sub(term, ' ', working_title_for_base, flags=re.IGNORECASE).strip()
-
-                    # 5. Remove any leftover website indicators or release group names
-                    release_group_patterns = [
-                        r'\s*-\s*(?:ETRG|EVO|RARBG|YTS|FxM|CM|TamilRockers|TamilBlasters)\b.*$',
-                        r'^\s*www\.\w+\.[\w/]+\s*-\s*', # leading website indicators
-                        r'\s*\b(?:DDP5\.1)\b', # Another release group related term from example
-                    ]
-                    for pattern in release_group_patterns:
-                        working_title_for_base = re.sub(pattern, ' ', working_title_for_base, flags=re.IGNORECASE).strip()
-                    
-                    # 6. Final cleanup of punctuation, multiple spaces, and trailing characters
-                    working_title_for_base = re.sub(r'[_\-.]+', ' ', working_title_for_base).strip() # Replace underscores, dashes, dots with spaces
-                    working_title_for_base = re.sub(r'[^a-zA-Z0-9\s]+', ' ', working_title_for_base).strip() # Remove all non-alphanumeric except spaces
-                    title = re.sub(r'\s+', ' ', working_title_for_base).strip() # Consolidate multiple spaces
-                    
-                    # Fallback if after all cleaning, the title is empty
-                    title = title or raw_entry_title.split('[')[0].strip() or "Unknown Title"
-
-                    # Final check: if year was still in title, remove it
-                    # This handles cases like "Movie Title 2023" where year might not be in parentheses initially.
-                    if year and year in title:
-                        title = title.replace(year, '').strip()
-                        title = re.sub(r'\s+', ' ', title).strip() # Clean up spaces after year removal
-
-                    # Generate `base_stremio_id` using the now-clean title and year
-                    base_stremio_id = f"tamilshows:{re.sub(r'[^a-zA-Z0-9]', '', title).lower()}{year or ''}"
-                    if not base_stremio_id or "unknowntitle" in base_stremio_id.lower(): 
-                        base_stremio_id = f"tamilshows:unknown_item_{int(time.time() * 1000)}_{os.urandom(4).hex()}" 
-
-                    # --- REFINED quality_details_raw extraction from description_html (uses title_full) ---
-                    # This section still uses the original, full title to extract detailed quality for stream display
-                    soup_desc = BeautifulSoup(description_html, 'html.parser')
-                    
-                    torrent_link_tag = soup_desc.find('a', class_='ipsAttachLink', attrs={'data-fileext': 'torrent'})
-                    if torrent_link_tag and torrent_link_tag.string:
                         torrent_filename_text = torrent_link_tag.string.strip()
-                        quality_match_from_filename = re.search(r'\[([^\]]+?)(?:\s*-\s*ESubs?)?\](?=\.torrent)', torrent_filename_text, re.IGNORECASE)
-                        if quality_match_from_filename:
-                            quality_details_raw = quality_match_from_filename.group(1).strip()
-                    
-                    if not quality_details_raw: # Fallback to title_full if not found in filename
-                        title_quality_match = re.search(r'\[([^\]]+?)(?:\s*-\s*ESubs?)?\]$', title_full, re.IGNORECASE)
-                        if title_quality_match:
-                            quality_details_raw = title_quality_match.group(1).strip()
+                        original_link = torrent_link_tag.get('href', '')
 
-                    quality_details_raw = re.sub(r'\s*-\s*ESubs?$', '', quality_details_raw, flags=re.IGNORECASE).strip()
-                    quality_details_raw = re.sub(r'^\s*\[|\]\s*$', '', quality_details_raw).strip() 
-                    quality_details_raw = re.sub(r'[-\s]+$', '', quality_details_raw).strip() 
-                    if quality_details_raw == "": 
-                        quality_details_raw = "N/A"
-
-                    # --- Parsing for audio_languages, video_codec, file_size from quality_details_raw ---
-                    temp_quality_for_extraction = quality_details_raw 
-
-                    language_match_in_quality = re.search(r'\[([^\]]+?)\]', temp_quality_for_extraction) 
-                    if language_match_in_quality:
-                        languages_str = language_match_in_quality.group(1).strip()
-                        audio_languages = [lang.strip() for lang in re.split(r'\s*\+\s*', languages_str)]
-                        temp_quality_for_extraction = temp_quality_for_extraction.replace(language_match_in_quality.group(0), '').strip()
-                        temp_quality_for_extraction = re.sub(r'[-\s]+$', '', temp_quality_for_extraction).strip() 
-                    
-                    temp_quality_for_extraction = re.sub(r'^\s*\[|\]\s*$', '', temp_quality_for_extraction).strip()
-
-                    video_codec_match = re.search(r'(x264|H\.264|H\.265|HEVC|AVC|VP9|AV1|DVDRip|WebRip|BRRip|BDRip|BluRay)', temp_quality_for_extraction, re.IGNORECASE)
-                    if video_codec_match:
-                        video_codec = video_codec_match.group(1).upper()
-                    
-                    size_match = re.search(r'(\d+(\.\d+)?(?:GB|MB))', temp_quality_for_extraction, re.IGNORECASE)
-                    if size_match:
-                        file_size = size_match.group(1).upper()
-
-                    concise_quality_elements = []
-                    resolution_match = re.search(r'(\d+p|4K)', temp_quality_for_extraction, re.IGNORECASE)
-                    if resolution_match:
-                        concise_quality_elements.append(resolution_match.group(1).upper())
-                    
-                    if re.search(r'HDRip', temp_quality_for_extraction, re.IGNORECASE):
-                        concise_quality_elements.append('HDRip')
-                    elif re.search(r'HD', temp_quality_for_extraction, re.IGNORECASE):
-                        concise_quality_elements.append('HD')
-                    elif re.search(r'WebDL|WEB-DL', temp_quality_for_extraction, re.IGNORECASE):
-                        concise_quality_elements.append('WEB-DL')
-                    elif re.search(r'BluRay|BDRip', temp_quality_for_extraction, re.IGNORECASE):
-                        concise_quality_elements.append('BluRay')
-                    
-                    if concise_quality_elements:
-                        extracted_quality_for_name = " ".join(concise_quality_elements)
-                    elif temp_quality_for_extraction and temp_quality_for_extraction != "N/A": 
-                        parts = [p.strip() for p in temp_quality_for_extraction.split('-') if p.strip()]
-                        meaningful_parts = [p for p in parts if not re.match(r'(x\d+|H\.264|H\.265|HEVC|AVC|DD\d+\.\d+|AAC|AC3)', p, re.IGNORECASE)]
-                        if meaningful_parts:
-                            extracted_quality_for_name = meaningful_parts[0]
+                        # Find the immediately following magnet link for this torrent file
+                        # This assumes magnet links are usually right after the torrent file link in the HTML
+                        magnet_link_tag = torrent_link_tag.find_next_sibling('a', class_='magnet-plugin', href=re.compile(r'magnet:\?xt=urn:btih:'))
+                        if magnet_link_tag:
+                            magnet_uri = magnet_link_tag.get('href', '')
                         else:
-                            extracted_quality_for_name = "Standard Quality"
-                    else:
-                        extracted_quality_for_name = "Standard Quality"
+                            logger.warning(f"No magnet link found for torrent '{torrent_filename_text}'. Skipping this stream.")
+                            continue # Skip this specific stream if no magnet link
 
-                    # Ensure all extracted values are strings
-                    quality_details_raw = quality_details_raw or "" 
-                    video_codec = video_codec or ""
-                    file_size = file_size or ""
-
-
-                    # --- Poster URL Parsing (Original, as fallback) ---
-                    catalog_poster_from_rss = ""
-                    meta_poster_from_rss = ""
-
-                    primary_img_tag = None
-                    all_ips_images = soup_desc.find_all('img', class_='ipsImage', attrs={'data-src': True})
-
-                    BAD_IMAGE_PATTERNS = [
-                        r'spacer\.png$', 
-                        r'emoticons/', 
-                        r'torrborder\.gif$', 
-                        r'torrenticon_92x92_blue\.png$',
-                        r'92x92_blue\.png$', 
-                        r'magnet-link-icon\.png$', 
-                        r'(\d+x\d+)\.(png|jpg|jpeg|gif)$',
-                        r'\.gif$'
-                    ]
-
-                    def is_undesirable_image(img_tag):
-                        url = img_tag.get('data-src') or img_tag.get('src')
-                        if not url:
-                            return True
-                        for pattern in BAD_IMAGE_PATTERNS:
-                            if re.search(pattern, url, re.IGNORECASE):
-                                return True
-                        width = -1
-                        height = -1
+                        # Parse pubDate from the main entry, as it's common for all qualities/files
+                        pub_date_str = entry.published
                         try:
-                            width_str = img_tag.get('width')
-                            if width_str is not None: width = int(width_str)
-                            height_str = img_tag.get('height')
-                            if height_str is not None: height = int(height_str)
+                            pub_date_dt = datetime.strptime(pub_date_str, '%a, %d %b %Y %H:%M:%S %z')
                         except ValueError:
-                            pass 
-                        if width > 0 and height > 0 and (width < 100 or height < 100): 
-                            return True
-                        return False
+                            try:
+                                pub_date_dt = datetime.strptime(pub_date_str, '%a, %d %b %Y %H:%M:%S %Z')
+                            except ValueError:
+                                if entry.published_parsed:
+                                    try:
+                                        pub_date_dt = datetime.fromtimestamp(time.mktime(entry.published_parsed))
+                                    except Exception:
+                                        pub_date_dt = datetime.now()
+                                else:
+                                    pub_date_dt = datetime.now()
 
-                    for img_tag in all_ips_images:
-                        if not is_undesirable_image(img_tag):
-                            primary_img_tag = img_tag
-                            break 
+                        # Use the new helper function to parse details from the torrent filename
+                        parsed_details = self._parse_torrent_filename(torrent_filename_text)
+                        title = parsed_details['title']
+                        year = parsed_details['year']
+                        quality_details_raw = parsed_details['quality_details_raw']
+                        extracted_quality_for_name = parsed_details['quality_for_name']
+                        audio_languages = parsed_details['audio_languages']
+                        video_codec = parsed_details['video_codec']
+                        file_size = parsed_details['file_size']
 
-                    if primary_img_tag:
-                        meta_poster_from_rss = primary_img_tag['data-src']
-                        if '.md.jpg' in meta_poster_from_rss:
-                            catalog_poster_from_rss = meta_poster_from_rss.replace('.md.jpg', '.th.jpg')
+                        # Generate `base_stremio_id` using the now-clean title and year
+                        # This ID must be consistent across all qualities of the same show/movie
+                        base_stremio_id = f"tamilshows:{re.sub(r'[^a-zA-Z0-9]', '', title).lower()}{year or ''}"
+                        if not base_stremio_id or "unknowntitle" in base_stremio_id.lower():
+                            base_stremio_id = f"tamilshows:unknown_item_{int(time.time() * 1000)}_{os.urandom(4).hex()}"
+
+                        # --- Poster URL Parsing (Original, as fallback) ---
+                        # This logic will be superseded by TMDb if a poster is found there
+                        primary_img_tag = None
+                        all_ips_images = soup_desc.find_all('img', class_='ipsImage', attrs={'data-src': True})
+
+                        BAD_IMAGE_PATTERNS = [
+                            r'spacer\.png$', r'emoticons/', r'torrborder\.gif$',
+                            r'torrenticon_92x92_blue\.png$', r'92x92_blue\.png$',
+                            r'magnet-link-icon\.png$', r'(\d+x\d+)\.(png|jpg|jpeg|gif)$',
+                            r'\.gif$'
+                        ]
+
+                        def is_undesirable_image(img_tag):
+                            url = img_tag.get('data-src') or img_tag.get('src')
+                            if not url: return True
+                            for pattern in BAD_IMAGE_PATTERNS:
+                                if re.search(pattern, url, re.IGNORECASE): return True
+                            width = -1; height = -1
+                            try:
+                                width_str = img_tag.get('width')
+                                if width_str is not None: width = int(width_str)
+                                height_str = img_tag.get('height')
+                                if height_str is not None: height = int(height_str)
+                            except ValueError: pass
+                            if width > 0 and height > 0 and (width < 100 or height < 100): return True
+                            return False
+
+                        for img_tag in all_ips_images:
+                            if not is_undesirable_image(img_tag):
+                                primary_img_tag = img_tag
+                                break
+
+                        catalog_poster_from_rss = ""
+                        meta_poster_from_rss = ""
+                        if primary_img_tag:
+                            meta_poster_from_rss = primary_img_tag['data-src']
+                            if '.md.jpg' in meta_poster_from_rss:
+                                catalog_poster_from_rss = meta_poster_from_rss.replace('.md.jpg', '.th.jpg')
+                            else:
+                                catalog_poster_from_rss = meta_poster_from_rss
+
+                        # --- TMDb Poster Retrieval (uses the CLEANED title and year) ---
+                        tmdb_poster_thumbnail_url = ""
+                        tmdb_poster_medium_url = ""
+                        
+                        if self.tmdb_manager.api_key:
+                            tmdb_result, tmdb_type = self.tmdb_manager.search_movie_or_tv(title, year)
+                            if tmdb_result and tmdb_result.get('poster_path'):
+                                poster_path = tmdb_result['poster_path']
+                                tmdb_poster_thumbnail_url = self.tmdb_manager.get_image_url(poster_path, "w185")
+                                tmdb_poster_medium_url = self.tmdb_manager.get_image_url(poster_path, "w500")
+
+                        catalog_poster_url = tmdb_poster_thumbnail_url or catalog_poster_from_rss
+                        meta_poster_url = tmdb_poster_medium_url or meta_poster_from_rss
+
+                        if not catalog_poster_url:
+                            catalog_poster_url = "https://placehold.co/185x278/000000/FFFFFF?text=No+Poster"
+                            logger.warning(f"Using generic placeholder for catalog poster for '{title}'.")
+                        if not meta_poster_url:
+                            meta_poster_url = "https://placehold.co/500x750/000000/FFFFFF?text=No+Poster"
+                            logger.warning(f"Using generic placeholder for meta poster for '{title}'.")
+
+
+                        # Log the parsed item details
+                        logger.debug(f"Parsed Item: Base_ID='{base_stremio_id}', Concise_Title='{title}', Year='{year}', "
+                                     f"Quality_Concise='{extracted_quality_for_name}', Quality_Full='{quality_details_raw}', "
+                                     f"Audio_Languages='{audio_languages}', Video_Codec='{video_codec}', File_Size='{file_size}', "
+                                     f"Poster_Thumbnail='{catalog_poster_url}', Poster_Medium='{meta_poster_url}', Magnet='{magnet_uri}'")
+
+
+                        if title and magnet_uri:
+                            items_data.append({
+                                'base_stremio_id': base_stremio_id, # This is the unified ID for the catalog entry
+                                'concise_title': title,           # This is the title for catalog display
+                                'year': year,
+                                'quality_details': quality_details_raw, # Full raw quality string for this specific stream
+                                'quality_for_name': extracted_quality_for_name, # Concise quality for stream name
+                                'audio_languages': json.dumps(audio_languages),
+                                'video_codec': video_codec,
+                                'file_size': file_size,
+                                'poster_thumbnail': catalog_poster_url,
+                                'poster_medium': meta_poster_url,
+                                'magnet_uri': magnet_uri,
+                                'pub_date': pub_date_dt, 
+                                'original_link': original_link # Use the direct torrent file link
+                            })
                         else:
-                            catalog_poster_from_rss = meta_poster_from_rss
-                    
-                    catalog_poster_from_rss = catalog_poster_from_rss or ""
-                    meta_poster_from_rss = meta_poster_from_rss or ""
-
-                    # --- TMDb Poster Retrieval ---
-                    tmdb_poster_thumbnail_url = ""
-                    tmdb_poster_medium_url = ""
-                    
-                    if self.tmdb_manager.api_key: # Only try TMDb if API key is set
-                        tmdb_result, tmdb_type = self.tmdb_manager.search_movie_or_tv(title, year) # Use the cleaned 'title' for TMDb search
-                        if tmdb_result and tmdb_result.get('poster_path'):
-                            poster_path = tmdb_result['poster_path']
-                            tmdb_poster_thumbnail_url = self.tmdb_manager.get_image_url(poster_path, "w185")
-                            tmdb_poster_medium_url = self.tmdb_manager.get_image_url(poster_path, "w500")
-
-                    # Use TMDb posters if available, otherwise fall back to RSS-parsed ones
-                    catalog_poster_url = tmdb_poster_thumbnail_url or catalog_poster_from_rss
-                    meta_poster_url = tmdb_poster_medium_url or meta_poster_from_rss
-
-                    # If all poster attempts fail, use a generic placeholder
-                    if not catalog_poster_url:
-                        catalog_poster_url = "https://placehold.co/185x278/000000/FFFFFF?text=No+Poster"
-                        logger.warning(f"Using generic placeholder for catalog poster for '{title}'.")
-                    if not meta_poster_url:
-                        meta_poster_url = "https://placehold.co/500x750/000000/FFFFFF?text=No+Poster"
-                        logger.warning(f"Using generic placeholder for meta poster for '{title}'.")
-
-
-                    magnet_link_tag = soup_desc.find('a', class_='magnet-plugin', href=re.compile(r'magnet:\?xt=urn:btih:'))
-                    magnet_uri = (magnet_link_tag['href'] if magnet_link_tag else None) or ""
-
-                    # Log the parsed item details
-                    logger.debug(f"Parsed Item: Base_ID='{base_stremio_id}', Concise_Title='{title}', Year='{year}', "
-                                 f"Quality_Concise='{extracted_quality_for_name}', Quality_Full='{quality_details_raw}', "
-                                 f"Audio_Languages='{audio_languages}', Video_Codec='{video_codec}', File_Size='{file_size}', "
-                                 f"Poster_Thumbnail='{catalog_poster_url}', Poster_Medium='{meta_poster_url}', Magnet='{magnet_uri}'")
-
-
-                    if title and magnet_uri:
-                        items_data.append({
-                            'base_stremio_id': base_stremio_id, # This is the unified ID for the catalog entry
-                            'concise_title': title,           # This is the title for catalog display
-                            'year': year,
-                            'quality_details': quality_details_raw, # Full raw quality string for this specific stream
-                            'quality_for_name': extracted_quality_for_name, # Concise quality for stream name
-                            'audio_languages': json.dumps(audio_languages),
-                            'video_codec': video_codec,
-                            'file_size': file_size,
-                            'poster_thumbnail': catalog_poster_url,
-                            'poster_medium': meta_poster_url,
-                            'magnet_uri': magnet_uri,
-                            'pub_date': pub_date_dt, 
-                            'original_link': link
-                        })
-                    else:
-                        logger.warning(f"Skipping item due to missing title or magnet: Title='{title}', Magnet Present={bool(magnet_uri)}")
-                except Exception as item_e:
-                    logger.error(f"Error parsing RSS item: {item_e} (Title: {entry.get('title', 'N/A')}, PubDate String: {entry.get('published', 'N/A')})", exc_info=True)
+                            logger.warning(f"Skipping item due to missing title or magnet: Title='{title}', Magnet Present={bool(magnet_uri)}")
+                    except Exception as torrent_item_e:
+                        logger.error(f"Error parsing individual torrent item: {torrent_item_e} (Filename: {torrent_filename_text if 'torrent_filename_text' in locals() else 'N/A'})", exc_info=True)
             logger.info(f"Successfully parsed {len(items_data)} items from RSS feed.")
         except requests.exceptions.RequestException as e:
             logger.error(f"Failed to fetch RSS feed from {feed_url}: {e}")
