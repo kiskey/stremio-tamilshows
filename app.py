@@ -80,6 +80,8 @@ class RedisManager:
         """Retrieves a catalog item from Redis."""
         try:
             item = self.client.hgetall(f"catalog:{stremio_id}")
+            if item:
+                item['id'] = stremio_id # Add stremio_id to the item data (FIX)
             return item if item else None
         except Exception as e:
             logger.error(f"Error retrieving catalog item '{stremio_id}': {e}")
