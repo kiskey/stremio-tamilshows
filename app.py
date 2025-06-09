@@ -4,6 +4,7 @@ import re
 import json
 import logging
 from flask import Flask, jsonify
+from flask_cors import CORS # Import CORS
 from apscheduler.schedulers.background import BackgroundScheduler
 from datetime import datetime, timedelta
 import time
@@ -36,6 +37,7 @@ CLEAR_REDIS_ON_STARTUP = os.environ.get('CLEAR_REDIS_ON_STARTUP', 'false').lower
 
 # --- Global Variables ---
 app = Flask(__name__)
+CORS(app) # Enable CORS for all routes and all origins
 scheduler = BackgroundScheduler()
 redis_client = None  # Initialized in main
 current_rss_feed_domain = None
@@ -188,12 +190,14 @@ class RedisManager:
     def clear_app_data(self):
         """Clears only the data inserted by this application from the Redis database."""
         try:
+            # Get all keys that start with "catalog:" or "streams:"
             catalog_keys = self.client.keys("catalog:*")
             stream_keys = self.client.keys("streams:*")
             
             all_app_keys = list(set(catalog_keys + stream_keys)) # Use set to avoid duplicates
 
             if all_app_keys:
+                # Delete all identified keys in one go
                 self.client.delete(*all_app_keys)
                 logger.info(f"Successfully cleared {len(all_app_keys)} application-specific keys from Redis database.")
             else:
@@ -307,14 +311,21 @@ class TrackerManager:
             return magnet_uri
 
         # Remove existing 'tr' parameters to avoid duplicates
-        base_magnet, existing_params_str = magnet_uri.split('?', 1)
-        params = [p for p in existing_params_str.split('&') if not p.startswith('tr=')]
+        # Split only on the first '?' to correctly handle magnet URIs that might contain '?' in dn
+        parts = magnet_uri.split('?', 1)
+        base_magnet = parts[0]
         
+        if len(parts) > 1:
+            existing_params_str = parts[1]
+            params = [p for p in existing_params_str.split('&') if not p.startswith('tr=')]
+        else:
+            params = [] # No existing parameters
+
         # Append new trackers
         for tracker in best_trackers:
             params.append(f"tr={tracker}")
         
-        return f"{base_magnet}?{'&'.join(params)}"
+        return f"{base_magnet}?{'&'.join(params)}" if params else base_magnet
 
 # --- RSS Parser ---
 class RSSParser:
@@ -518,15 +529,27 @@ def stream(type, stremio_id):
             # Append best trackers to the magnet URI
             final_magnet_uri = tracker_manager.append_trackers_to_magnet(magnet_uri)
             
-            stremio_stream = {
-                "name": f"Quality: {quality}",
-                "description": f"Source: 1TamilBlasters - {quality}",
-                "infoHash": re.search(r'btih:([^&]+)', final_magnet_uri).group(1) if re.search(r'btih:([^&]+)', final_magnet_uri) else None,
-                "sources": [final_magnet_uri], # The final_magnet_uri already includes all best trackers
-                "url": final_magnet_uri,
-                "title": f"{s_data.get('title', 'N/A')} ({quality})"
-            }
-            stremio_streams.append(stremio_stream)
+            # Extract infoHash
+            info_hash_match = re.search(r'btih:([^&]+)', final_magnet_uri)
+            info_hash = info_hash_match.group(1) if info_hash_match else None
+
+            # Extract tracker URLs from the final_magnet_uri for the 'sources' field
+            # The regex looks for 'tr=' followed by anything that's not '&' until '&' or end of string
+            tracker_urls_matches = re.findall(r'tr=([^&]+)', final_magnet_uri)
+            
+            # Format trackers for Stremio's 'sources' field (tracker:URL or dht:NODE_ID)
+            stremio_sources = [f"tracker:{url}" for url in tracker_urls_matches]
+            
+            if info_hash: # Only add stream if we successfully got an infoHash
+                stremio_stream = {
+                    "name": f"Quality: {quality}",
+                    "description": f"Source: 1TamilBlasters - {quality}",
+                    "infoHash": info_hash,
+                    "sources": stremio_sources, # This now contains only formatted tracker URLs
+                    # Removed "url" field as it's for direct video URLs, not magnet links.
+                    "title": f"{s_data.get('title', 'N/A')} ({quality})"
+                }
+                stremio_streams.append(stremio_stream)
     
     # Sort streams by quality (e.g., 1080p before 720p)
     # This assumes quality strings are consistently parseable (e.g., '1080p', '720p', etc.)
