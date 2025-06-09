@@ -11,8 +11,9 @@ import time
 import requests
 import feedparser
 from bs4 import BeautifulSoup
-import redis
 from urllib.parse import unquote_plus, parse_qs # Import unquote_plus and parse_qs from urllib.parse
+import redis
+
 
 # --- Configuration from Environment Variables ---
 # Initial RSS Feed URL - This will be updated dynamically
@@ -662,34 +663,35 @@ class RSSParser:
                         original_link = torrent_link_tag.get('href', '')
 
                         # --- Robust Magnet Link Association ---
-                        # Attempt to find a magnet link whose 'dn' parameter matches the torrent filename
                         found_magnet = False
-                        # Clean torrent filename for better matching with magnet URI's dn parameter
-                        cleaned_torrent_filename_for_magnet_match = torrent_filename_text.replace("www.1TamilBlasters", "").replace(".fi", "").replace(".re", "").replace(".earth", "").replace(".torrent", "").strip()
-                        cleaned_torrent_filename_for_magnet_match = re.sub(r'[_\-.]+', ' ', cleaned_torrent_filename_for_magnet_match).strip().lower()
-
+                        
+                        # Prepare the torrent_filename_text for comparison with magnet's DN
+                        # Remove '.torrent' extension and normalize spaces
+                        normalized_torrent_filename_base = re.sub(r'\.torrent$', '', torrent_filename_text, flags=re.IGNORECASE)
+                        normalized_torrent_filename_base = re.sub(r'[_\-.]+', ' ', normalized_torrent_filename_base).strip().lower()
 
                         for m_link_tag in all_magnet_links_in_desc:
                             m_href = m_link_tag.get('href', '')
                             dn_match = re.search(r'&dn=([^&]+)', m_href)
                             if dn_match:
-                                # URL decode and replace '+' with space for comparison
-                                dn_decoded = unquote_plus(dn_match.group(1)).replace("+", " ").strip().lower()
+                                # URL decode, replace '+' with space, remove '.torrent' and normalize spaces
+                                dn_decoded_normalized = unquote_plus(dn_match.group(1)).replace("+", " ").strip().lower()
+                                dn_decoded_normalized_base = re.sub(r'\.torrent$', '', dn_decoded_normalized, flags=re.IGNORECASE)
+                                dn_decoded_normalized_base = re.sub(r'[_\-.]+', ' ', dn_decoded_normalized_base).strip()
                                 
-                                # Check if the torrent filename (or a substantial part of it) is in the magnet's display name
-                                if cleaned_torrent_filename_for_magnet_match in dn_decoded:
+                                # Check if the normalized torrent filename is a substring of the normalized magnet DN
+                                # or vice versa, for better flexibility.
+                                if normalized_torrent_filename_base in dn_decoded_normalized_base or \
+                                   dn_decoded_normalized_base in normalized_torrent_filename_base:
                                     magnet_uri = m_href
                                     found_magnet = True
-                                    break
-                                # Fallback: check if the original torrent filename (without .torrent) is in magnet's display name
-                                elif torrent_filename_text.lower().replace(".torrent", "") in dn_decoded:
-                                    magnet_uri = m_href
-                                    found_magnet = True
+                                    logger.debug(f"Magnet found for '{torrent_filename_text}' with DN '{dn_decoded_normalized_base}'")
                                     break
                         
                         if not found_magnet:
                             logger.warning(f"No corresponding magnet link found for torrent '{torrent_filename_text}'. Skipping this stream.")
                             continue # Skip this specific stream if no magnet link
+
 
                         # Parse pubDate from the main entry, as it's common for all qualities/files
                         pub_date_str = entry.published
@@ -879,13 +881,18 @@ def catalog(type, id, extra=None):
 
     skip = 0
     if extra:
+        logger.debug(f"Raw 'extra' parameter received: '{extra}'") # Debug log for the extra parameter
         try:
             # Parse the query string parameters from 'extra'
             extra_params = parse_qs(extra)
             # The 'skip' parameter will be a list, so take the first element
-            skip = int(extra_params.get('skip', ['0'])[0])
+            skip_value_str = extra_params.get('skip', ['0'])[0]
+            skip = int(skip_value_str)
         except ValueError:
-            logger.warning(f"Invalid skip value in extra parameter: {extra}. Assuming skip=0.")
+            logger.warning(f"Invalid integer value '{skip_value_str}' for 'skip' in extra parameter: {extra}. Assuming skip=0.")
+            skip = 0
+        except Exception as e:
+            logger.error(f"An unexpected error occurred while parsing extra parameter '{extra}': {e}. Assuming skip=0.", exc_info=True)
             skip = 0
     
     limit = 100 # Stremio's standard page size for catalogs
@@ -1045,8 +1052,7 @@ def stream(type, id):
                 logger.warning(f"No magnet URI found for stream data for catalog ID '{id}'. Skipping stream entry.")
                 continue
 
-            info_hash_match = re.search(r'btih:([^&]+)', magnet_uri)
-                # Ensure the magnet URI is properly URL-decoded before extracting infoHash
+            # Ensure the magnet URI is properly URL-decoded before extracting infoHash
             info_hash_match = re.search(r'btih:([^&]+)', unquote_plus(magnet_uri))
             info_hash = info_hash_match.group(1) if info_hash_match else None
 
@@ -1173,8 +1179,10 @@ def update_rss_feed_and_catalog():
 
         # Now, add/update the specific stream data to this base catalog item's streams list
         # Extract infoHash for stream uniqueness check
-        info_hash_match = re.search(r'btih:([^&]+)', entry_data['magnet_uri'])
-        stream_info_hash = info_hash_match.group(1) if info_hash_match else None
+        stream_info_hash = None
+        if entry_data['magnet_uri']:
+            info_hash_match = re.search(r'btih:([^&]+)', unquote_plus(entry_data['magnet_uri']))
+            stream_info_hash = info_hash_match.group(1) if info_hash_match else None
 
         if not stream_info_hash:
             logger.warning(f"Skipping stream addition for '{concise_title}' due to missing infoHash in magnet URI: {entry_data['magnet_uri']}")
