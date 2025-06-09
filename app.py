@@ -560,7 +560,8 @@ def manifest():
         "icon": "https://upload.wikimedia.org/wikipedia/commons/thumb/e/e0/Stremio_Logo.png/800px-Stremio_Logo.png",
         "behaviorHints": {
             "configurable": True,
-            "randomize": False
+            "randomize": False,
+            "p2p": True # Added p2p hint here
         }
     }
     return jsonify(manifest_data)
