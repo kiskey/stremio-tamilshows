@@ -425,19 +425,23 @@ class RSSParser:
 
 
                     # --- Logic for parsing title and quality ---
+                    # Clean title_full first: remove common suffixes and redundant spaces/hyphens
+                    # Also aggressively remove any leading/trailing brackets from the *full* title
+                    cleaned_title_full = title_full.replace(" - ESub", "").replace(" -ESubs", "").strip()
+                    cleaned_title_full = re.sub(r'^\s*\[|\]\s*$', '', cleaned_title_full).strip() # Remove leading/trailing brackets
+                    cleaned_title_full = re.sub(r'[-\s]+$', '', cleaned_title_full).strip() # Remove trailing hyphens/spaces before final bracket split
+                    
                     # Split title_full by the LAST '[' to separate base title from potential quality/extra info
-                    title_parts_split_by_last_bracket = title_full.rsplit('[', 1)
+                    title_parts_split_by_last_bracket = cleaned_title_full.rsplit('[', 1)
                     
                     if len(title_parts_split_by_last_bracket) > 1:
-                        # Before stripping, capture the potential quality raw string
-                        quality_details_raw_candidate = title_parts_split_by_last_bracket[1].rstrip(']').strip()
-                        # Now, clean the title candidate
+                        quality_details_raw = title_parts_split_by_last_bracket[1].rstrip(']').strip()
+                        # Clean the title candidate, removing any trailing hyphens or spaces
                         title_candidate = title_parts_split_by_last_bracket[0].strip()
-                        
-                        # Use the captured raw quality string if it's not empty, otherwise default
-                        quality_details_raw = quality_details_raw_candidate or ""
+                        title_candidate = re.sub(r'[-\s]+$', '', title_candidate).strip() # Remove trailing hyphens/spaces
+
                     else:
-                        title_candidate = title_full.strip()
+                        title_candidate = cleaned_title_full.strip()
                         quality_details_raw = "" # No quality details found in brackets
 
 
@@ -452,110 +456,124 @@ class RSSParser:
                         title_base = title_candidate.strip()
 
                     # Clean up title_base from potential trailing "S01 EP(01-12)" or similar if it's not the year
-                    # This step is crucial if the format is "Show Name S01 EP(01-12) [quality]"
-                    # The pattern for quality/episode info should be refined to target what's left after initial split
                     episode_info_match = re.search(r'(S\d+E\d+|S\d+\s*EP\(\d+-\d+\)|Season \d+ Episode \d+)', title_base, re.IGNORECASE)
                     if episode_info_match:
                         title_base = title_base[:episode_info_match.start()].strip()
+                        title_base = re.sub(r'[-\s]+$', '', title_base).strip() # Clean trailing hyphens/spaces again
+                    
+                    # FINAL cleaning of the title (item.name)
+                    title = re.sub(r'[:\s-]+$', '', title_base).strip() # Remove any remaining trailing colons, spaces, hyphens
+                    if title.endswith(' -'): # handle cases like "Movie Name -"
+                        title = title[:-2].strip()
 
+                    # Final decision for extracted_quality_for_name
+                    # This section needs to produce a clean string without "Tamil + Telugu" if it's not a quality.
+                    # It should prioritize resolutions, then HDRip/HD, then other meaningful quality indicators.
+                    
+                    temp_quality_details = quality_details_raw
+                    # If quality_details_raw starts with languages in brackets, remove them for quality extraction
+                    # e.g., "[Tamil + Telugu + Hindi] - x264 - 2.2GB" -> "x264 - 2.2GB"
+                    lang_at_start_match = re.match(r'\[([^\]]+)\]\s*-\s*', temp_quality_details)
+                    if lang_at_start_match:
+                        temp_quality_details = temp_quality_details[len(lang_at_start_match.group(0)):].strip()
 
-                    # Ensure all extracted values are strings
-                    title = title_base or ""
-                    year = year or ""
-                    quality_details_raw = quality_details_raw or "" # Ensure it's string, not None
-
-                    # Refine quality_details for Stremio's 'name' and 'description'
+                    # Re-run existing logic for concise_quality_elements with the cleaned temp_quality_details
                     concise_quality_elements = []
-                    
-                    # --- Extract specific details from quality_details_raw ---
-                    
-                    # Resolutions (4K, 1080p, 720p, 480p)
-                    resolution_match = re.search(r'(\d+p|4K)', quality_details_raw, re.IGNORECASE)
+                    resolution_match = re.search(r'(\d+p|4K)', temp_quality_details, re.IGNORECASE)
                     if resolution_match:
                         concise_quality_elements.append(resolution_match.group(1).upper())
                     
-                    # General quality terms (HD, HDRip)
-                    if re.search(r'HDRip', quality_details_raw, re.IGNORECASE):
+                    if re.search(r'HDRip', temp_quality_details, re.IGNORECASE):
                         concise_quality_elements.append('HDRip')
-                    elif re.search(r'HD', quality_details_raw, re.IGNORECASE):
+                    elif re.search(r'HD', temp_quality_details, re.IGNORECASE):
                         concise_quality_elements.append('HD')
                     
-                    # Video Codec (x264, H.264, H.265, HEVC)
-                    video_codec_match = re.search(r'(x264|H\.264|H\.265|HEVC|AVC)', quality_details_raw, re.IGNORECASE)
-                    if video_codec_match:
-                        video_codec = video_codec_match.group(1).upper()
-                    
-                    # Audio Languages (e.g., [Tam + Mal + Tel + Hin + Kan])
-                    language_match = re.search(r'\[([^\]]+)\]', quality_details_raw)
-                    if language_match:
-                        languages_str = language_match.group(1).strip()
-                        audio_languages = [lang.strip() for lang in re.split(r'\s*\+\s*', languages_str)]
-                    
-                    # File Size (e.g., 16.5GB, 800MB)
-                    size_match = re.search(r'(\d+(\.\d+)?(GB|MB))', quality_details_raw, re.IGNORECASE)
-                    if size_match:
-                        file_size = size_match.group(1).upper()
-
-                    # Final decision for extracted_quality_for_name
                     if concise_quality_elements:
                         extracted_quality_for_name = " ".join(concise_quality_elements)
-                    elif quality_details_raw: # Fallback to first segment if no specific keywords
-                        extracted_quality_for_name = quality_details_raw.split('-')[0].strip()
+                    elif temp_quality_details: 
+                        # Fallback to first segment if no specific keywords, but ensure it's not just "x264" or "DD5.1"
+                        parts = [p.strip() for p in temp_quality_details.split('-') if p.strip()]
+                        # Filter out known non-quality indicators like codecs, audio formats
+                        meaningful_parts = [p for p in parts if not re.match(r'(x\d+|H\.264|H\.265|HEVC|AVC|DD\d+\.\d+|AAC|AC3)', p, re.IGNORECASE)]
+                        if meaningful_parts:
+                            extracted_quality_for_name = meaningful_parts[0]
+                        else:
+                            extracted_quality_for_name = "Unknown Quality" # If only non-quality parts remain
                     else:
-                        extracted_quality_for_name = "Unknown Quality" # Default if nothing found
+                        extracted_quality_for_name = "Unknown Quality"
 
                     description_quality = quality_details_raw if quality_details_raw else "No additional quality details available."
 
-                    # --- Logic for parsing poster URL - REFINED ---
+                    # --- Logic for parsing poster URL - REFINED AND MORE ROBUST ---
                     soup = BeautifulSoup(description_html, 'html.parser')
                     poster_url = ""
 
-                    # Define known "bad" image patterns (emoticons, spacers, borders)
+                    # Define known "bad" image patterns (emoticons, spacers, borders, small icons)
                     BAD_IMAGE_PATTERNS = [
-                        r'spacer\.png$', # Stremio's default placeholder
-                        r'emoticons/clapping\.gif$', # Common emoji from your logs
-                        r'torrborder\.gif$', # Common border from your logs
-                        r'torrenticon_92x92_blue\.png$' # Small icon from your logs
+                        r'spacer\.png$', 
+                        r'emoticons/', # Catches all emoticons/gifs in that folder
+                        r'torrborder\.gif$', 
+                        r'torrenticon_92x92_blue\.png$',
+                        r'92x92_blue\.png$', # More general if pattern varies
+                        r'magnet-link-icon\.png$', # If other common icons appear
+                        r'(\d+x\d+)\.(png|jpg|jpeg|gif)$' # Catches images with explicit small dimensions in filename, e.g. "92x92.png"
                     ]
 
-                    # Function to check if a URL matches any bad pattern
-                    def is_bad_image_url(url):
-                        if not url: return True
+                    # Function to check if an image tag is undesirable based on URL and optionally size
+                    def is_undesirable_image(img_tag):
+                        # Get URL from either data-src or src attribute
+                        url = img_tag.get('data-src') or img_tag.get('src')
+                        if not url:
+                            return True # No valid URL to check
+
+                        # 1. Always prioritize checking against known bad URL patterns
                         for pattern in BAD_IMAGE_PATTERNS:
                             if re.search(pattern, url, re.IGNORECASE):
-                                return True
+                                logger.debug(f"Rejecting image by pattern: {url}")
+                                return True # This image is undesirable
+
+                        # 2. If not rejected by pattern, check dimensions if they are explicitly small
+                        width = -1
+                        height = -1
+                        try:
+                            width_str = img_tag.get('width')
+                            if width_str is not None:
+                                width = int(width_str)
+                            height_str = img_tag.get('height')
+                            if height_str is not None:
+                                height = int(height_str)
+                        except ValueError:
+                            # If attributes are not valid integers, treat as unknown size and don't use this check
+                            pass
+
+                        # If both dimensions are available and are very small (e.g., icons, buttons)
+                        if width > 0 and height > 0 and (width < 100 or height < 100): # Threshold for a "real" poster
+                            logger.debug(f"Rejecting image by small explicit size: {url} ({width}x{height})")
+                            return True
+
+                        # If it passed all checks, it's considered a desirable image
                         return False
 
-                    # Try to find a good poster with data-src first
-                    all_data_src_images = soup.find_all('img', attrs={'data-src': True})
-                    for img_tag in all_data_src_images:
-                        temp_url = img_tag.get('data-src')
-                        if temp_url and not is_bad_image_url(temp_url):
-                            # Add a basic size check to prefer larger images (heuristics)
-                            width = int(img_tag.get('width', 0))
-                            height = int(img_tag.get('height', 0))
-                            if width > 100 or height > 100: # Arbitrary threshold for a "real" poster
-                                poster_url = temp_url
-                                logger.debug(f"Poster found (Priority Data-Src, large enough): {poster_url}")
-                                break
-                            else:
-                                logger.debug(f"Skipping small data-src image: {temp_url} (size: {width}x{height})")
 
+                    # Try to find a good poster with 'data-src' first, as suggested by XPath
+                    data_src_images = soup.find_all('img', attrs={'data-src': True})
+                    for img_tag in data_src_images:
+                        if not is_undesirable_image(img_tag): # is_undesirable_image will check data-src first
+                            poster_url = img_tag.get('data-src')
+                            logger.debug(f"Selected poster URL (data-src, desirable): {poster_url}")
+                            break # Found a suitable data-src poster
 
-                    # Fallback to src if no good data-src image was found
+                    # Fallback to 'src' if no suitable 'data-src' image was found
                     if not poster_url:
-                        all_src_images = soup.find_all('img', attrs={'src': True})
-                        for img_tag in all_src_images:
-                            temp_url = img_tag.get('src')
-                            if temp_url and not is_bad_image_url(temp_url):
-                                width = int(img_tag.get('width', 0))
-                                height = int(img_tag.get('height', 0))
-                                if width > 100 or height > 100:
-                                    poster_url = temp_url
-                                    logger.debug(f"Poster found (Fallback Src, large enough): {poster_url}")
-                                    break
-                                else:
-                                    logger.debug(f"Skipping small src image: {temp_url} (size: {width}x{height})")
+                        src_images = soup.find_all('img', attrs={'src': True})
+                        for img_tag in src_images:
+                            # Avoid re-processing images already checked for data-src if they also have src
+                            # And ensure this image itself is not undesirable
+                            # Check if the img_tag has a data-src that was already considered undesirable
+                            if not is_undesirable_image(img_tag): 
+                                poster_url = img_tag.get('src')
+                                logger.debug(f"Selected poster URL (src, desirable): {poster_url}")
+                                break # Found a suitable src poster
 
                     poster_url = poster_url or "" # Ensure it's an empty string if nothing valid found
                     if not poster_url:
@@ -738,16 +756,16 @@ def meta(type, id):
             stream_name_parts = ["TamilBlasters"]
             if quality_for_name and quality_for_name != "Unknown Quality":
                 stream_name_parts.append(quality_for_name)
-            stream_name = " ".join(stream_name_parts)
+            stream_name = " - ".join(stream_name_parts) # Changed to " - " for cleaner name
 
             stream_title_parts = [item.get('title', 'N/A')] # Use cleaned title from item
             if audio_languages:
-                stream_title_parts.append(f"({', '.join(audio_languages)})")
+                stream_title_parts.append(f"{', '.join(audio_languages)}")
             if video_codec:
                 stream_title_parts.append(video_codec)
             if file_size:
                 stream_title_parts.append(file_size)
-            stream_title = " ".join(stream_title_parts)
+            stream_title = " | ".join(filter(None, stream_title_parts)) # Join with " | " and filter empty parts
 
             embedded_stremio_streams.append({
                 "name": stream_name, 
@@ -817,7 +835,7 @@ def stream(type, stremio_id):
             stream_name_parts = ["TamilBlasters"]
             if quality_for_name and quality_for_name != "Unknown Quality":
                 stream_name_parts.append(quality_for_name)
-            stream_name = " ".join(stream_name_parts)
+            stream_name = " - ".join(stream_name_parts) # Changed to " - " for cleaner name
 
             # Use the original title from the item in Redis
             item_data = redis_client.get_catalog_item(stremio_id)
@@ -825,12 +843,12 @@ def stream(type, stremio_id):
 
             stream_title_parts = [original_title] 
             if audio_languages:
-                stream_title_parts.append(f"({', '.join(audio_languages)})")
+                stream_title_parts.append(f"{', '.join(audio_languages)}")
             if video_codec:
                 stream_title_parts.append(video_codec)
             if file_size:
                 stream_title_parts.append(file_size)
-            stream_title = " ".join(stream_title_parts)
+            stream_title = " | ".join(filter(None, stream_title_parts)) # Join with " | " and filter empty parts
 
             stremio_stream = {
                 "name": stream_name, 
@@ -840,9 +858,9 @@ def stream(type, stremio_id):
                 "title": stream_title
             }
             stremio_streams.append(stremio_stream)
-            logger.debug(f"Returning stream object for '{stremio_id}': {json.dumps(stremio_stream, indent=2)}")
-        else:
-            logger.warning(f"No magnet URI found for stream '{stremio_id}'. Skipping stream entry.")
+    
+    # Log the exact stream response JSON
+    logger.debug(f"Returning stream response for '{stremio_id}': {json.dumps(stremio_streams, indent=2)}")
 
     # Sort streams by quality (e.g., 1080p before 720p)
     quality_order = {'4K': 5, '2160P': 4, '1080P': 3, '720P': 2, '480P': 1} 
