@@ -1,0 +1,7 @@
+# requirements.txt
+Flask
+redis
+requests
+beautifulsoup4
+feedparser
+APScheduler
