@@ -390,8 +390,20 @@ class RSSParser:
                     # Parse description for poster and magnet link
                     soup = BeautifulSoup(description_html, 'html.parser')
                     
+                    # Try to find poster from data-src first, then src
                     poster_img = soup.find('img', class_='ipsImage', attrs={'data-src': True})
-                    poster_url = (poster_img['data-src'] if poster_img else None) or ""
+                    if not poster_img:
+                        poster_img = soup.find('img', class_='ipsImage', attrs={'src': True})
+                    
+                    poster_url = ""
+                    if poster_img:
+                        poster_url = poster_img.get('data-src') or poster_img.get('src')
+                        if not poster_url:
+                            logger.debug(f"Found img tag for '{title}' but no valid 'data-src' or 'src' attribute.")
+                    else:
+                        logger.debug(f"No img tag with class 'ipsImage' found for '{title}'. Poster will be empty.")
+
+                    poster_url = poster_url or "" # Ensure it's an empty string if nothing found
 
                     magnet_link_tag = soup.find('a', class_='magnet-plugin', href=re.compile(r'magnet:\?xt=urn:btih:'))
                     magnet_uri = (magnet_link_tag['href'] if magnet_link_tag else None) or ""
@@ -550,7 +562,10 @@ def stream(type, stremio_id):
                     "title": f"{s_data.get('title', 'N/A')} ({quality})"
                 }
                 stremio_streams.append(stremio_stream)
-    
+                logger.debug(f"Returning stream object for '{stremio_id}': {stremio_stream}")
+            else:
+                logger.warning(f"Could not extract infoHash for stream '{stremio_id}' with magnet URI: {magnet_uri}")
+
     # Sort streams by quality (e.g., 1080p before 720p)
     # This assumes quality strings are consistently parseable (e.g., '1080p', '720p', etc.)
     quality_order = {'2160p': 4, '1080p': 3, '720p': 2, '480p': 1}
