@@ -436,6 +436,8 @@ class RSSParser:
         audio_languages = []
         video_codec = ""
         file_size = ""
+        season_info = "" # Initialize new season info
+        episode_info = "" # Initialize new episode info
 
         working_filename = filename_str.strip()
 
@@ -456,21 +458,47 @@ class RSSParser:
             # Remove the matched quality block from the working filename
             working_filename = working_filename.replace(quality_block_match.group(0), ' ').strip()
         
-        # 4. Remove season/episode patterns, as they often appear before the quality block or in the base title
-        season_episode_patterns = [
-            r'\bS(?:eason)?\s*\d+\s*E(?:pisode)?\s*\d+(?:-\d+)?\b', # S01E01, Season 1 Episode 1
-            r'\bS(?:eason)?\s*\d+\b',                             # S01, Season 1
-            r'\bEP\s*\(\d+(?:-\d+)?\)\b',                         # EP(01-10)
-            r'\bE(?:pisode)?\s*\d+(?:-\d+)?\b',                   # E01, Episode 01-06
-            r'\bPart\s+\d+\b',                                    # Part 1
-            r'\bVol(?:\.|ume)?\s+\d+\b',                          # Vol. 1, Volume 2
-            r'\b\d+\s*Episodes?\b',                               # 10 Episodes
-            r'\bComplete\s*Season(?:s)?\b',                       # Complete Season, Complete Seasons
-            r'\bCollection(?:\s+\d+)?\b',                         # Collection, Collection 1
-            r'\b(?:Mini[\-.\s]?)Series\b',                        # Mini-Series
+        # 4. Extract Season/Episode information before cleaning up the main title
+        # Ordered from most specific to less specific for better parsing
+        season_episode_patterns_to_capture = [
+            # S06E11, Season6E11, S6Ep11, Season 06 Episode 11
+            r'\b(?:S|Season)\s*(\d+)(?:\s*|E|EP|Episode)\s*(\d+)(?:-\d+)?\b', 
+            # S01 (Season only)
+            r'\b(?:S|Season)\s*(\d+)\b',
+            # EP(06), EP(06-12)
+            r'\bEP\s*\(([\d-]+)\)\b', 
+            # E11, Episode 11 (episode only, capture as episode)
+            r'\b(?:E|Episode)\s*(\d+)(?:-\d+)?\b', 
         ]
-        for pattern in season_episode_patterns:
-            working_filename = re.sub(pattern, ' ', working_filename, flags=re.IGNORECASE).strip()
+
+        temp_filename_for_se_parsing = working_filename # Use a temporary copy for parsing
+        best_match_str = ""
+
+        for pattern in season_episode_patterns_to_capture:
+            match = re.search(pattern, temp_filename_for_se_parsing, re.IGNORECASE)
+            if match:
+                current_match_str = match.group(0)
+                # Prefer the longest match as it's likely more complete
+                if len(current_match_str) > len(best_match_str):
+                    best_match_str = current_match_str
+                    if match.re.pattern.startswith(r'\b(?:S|Season)\s*(\d+)(?:\s*|E|EP|Episode)\s*(\d+)'):
+                        season_val = match.group(1)
+                        episode_val = match.group(2)
+                        season_info = f"S{int(season_val):02d}" if season_val else ""
+                        episode_info = f"E{episode_val}" if episode_val else ""
+                    elif match.re.pattern.startswith(r'\b(?:S|Season)\s*(\d+)\b'):
+                        season_val = match.group(1)
+                        season_info = f"S{int(season_val):02d}" if season_val else ""
+                        episode_info = "" # Ensure episode is cleared if only season found
+                    elif match.re.pattern.startswith(r'\bEP\s*\(([\d-]+)\)\b') or match.re.pattern.startswith(r'\b(?:E|Episode)\s*(\d+)'):
+                        episode_val = match.group(1)
+                        episode_info = f"E{episode_val}" if episode_val else ""
+                        season_info = "" # Ensure season is cleared if only episode found
+        
+        if best_match_str:
+            working_filename = working_filename.replace(best_match_str, ' ').strip()
+            working_filename = re.sub(r'\s+', ' ', working_filename).strip() # clean up extra spaces
+
 
         # 5. Clean up the main title
         # Remove common separators and consolidate spaces
@@ -544,6 +572,9 @@ class RSSParser:
         quality_details_raw = quality_details_raw or ""
         video_codec = video_codec or ""
         file_size = file_size or ""
+        season_info = season_info or "" # Ensure season info is string
+        episode_info = episode_info or "" # Ensure episode info is string
+
 
         return {
             'title': title,
@@ -552,7 +583,9 @@ class RSSParser:
             'quality_for_name': extracted_quality_for_name,
             'audio_languages': audio_languages,
             'video_codec': video_codec,
-            'file_size': file_size
+            'file_size': file_size,
+            'season_info': season_info, # Return parsed season info
+            'episode_info': episode_info # Return parsed episode info
         }
 
     def parse_rss_feed(self, feed_url):
@@ -620,6 +653,9 @@ class RSSParser:
                     meta_poster_url = "https://placehold.co/500x750/000000/FFFFFF?text=No+Poster"
                     magnet_uri = ""
                     pub_date_dt = datetime.now() # Fallback for pub_date
+                    season_info = "" # Initialize new season info
+                    episode_info = "" # Initialize new episode info
+
 
                     try:
                         torrent_filename_text = torrent_link_tag.string.strip()
@@ -684,6 +720,8 @@ class RSSParser:
                         audio_languages = parsed_details['audio_languages']
                         video_codec = parsed_details['video_codec']
                         file_size = parsed_details['file_size']
+                        season_info = parsed_details['season_info'] # Retrieve parsed season info
+                        episode_info = parsed_details['episode_info'] # Retrieve parsed episode info
 
                         # Generate `base_stremio_id` using the now-clean title and year
                         # This ID must be consistent across all qualities of the same show/movie
@@ -758,7 +796,8 @@ class RSSParser:
                         logger.debug(f"Parsed Item: Base_ID='{base_stremio_id}', Concise_Title='{title}', Year='{year}', "
                                      f"Quality_Concise='{extracted_quality_for_name}', Quality_Full='{quality_details_raw}', "
                                      f"Audio_Languages='{audio_languages}', Video_Codec='{video_codec}', File_Size='{file_size}', "
-                                     f"Poster_Thumbnail='{catalog_poster_url}', Poster_Medium='{meta_poster_url}', Magnet='{magnet_uri}'")
+                                     f"Poster_Thumbnail='{catalog_poster_url}', Poster_Medium='{meta_poster_url}', Magnet='{magnet_uri}', "
+                                     f"Season='{season_info}', Episode='{episode_info}'")
 
 
                         if title and magnet_uri:
@@ -775,7 +814,9 @@ class RSSParser:
                                 'poster_medium': meta_poster_url,
                                 'magnet_uri': magnet_uri,
                                 'pub_date': pub_date_dt, 
-                                'original_link': original_link # Use the direct torrent file link
+                                'original_link': original_link, # Use the direct torrent file link
+                                'season_info': season_info, # Store parsed season info
+                                'episode_info': episode_info # Store parsed episode info
                             })
                         else:
                             logger.warning(f"Skipping item due to missing title or magnet: Title='{title}', Magnet Present={bool(magnet_uri)}")
@@ -906,10 +947,11 @@ def meta(type, id):
                 continue
 
             quality_for_name = s_data.get('quality') # Use the stored concise quality
-            description_quality = s_data.get('quality_details') or "No description available."
             audio_languages = json.loads(s_data.get('audio_languages', '[]'))
             video_codec = s_data.get('video_codec', '')
             file_size = s_data.get('file_size', '')
+            season_info = s_data.get('season_info', '') # Get season info
+            episode_info = s_data.get('episode_info', '') # Get episode info
             
             final_magnet_uri = tracker_manager.append_trackers_to_magnet(magnet_uri)
             info_hash_match = re.search(r'btih:([^&]+)', final_magnet_uri)
@@ -931,6 +973,16 @@ def meta(type, id):
 
             # Stream title should provide specific quality, language, codec, size
             stream_title_parts = [item.get('title', 'N/A')] # Base title from catalog item
+            
+            # Add season and episode info
+            se_parts = []
+            if season_info:
+                se_parts.append(season_info)
+            if episode_info:
+                se_parts.append(episode_info)
+            if se_parts:
+                stream_title_parts.append(" ".join(se_parts))
+
             if audio_languages:
                 stream_title_parts.append(f"[{', '.join(audio_languages)}]")
             if video_codec:
@@ -941,7 +993,6 @@ def meta(type, id):
 
 
             embedded_stremio_streams.append({
-                # "id": info_hash, # Removed as per user's observation that stream endpoint uses catalog ID
                 "name": stream_name, 
                 "description": stream_title, 
                 "infoHash": info_hash,
@@ -1013,6 +1064,8 @@ def stream(type, id):
             audio_languages = json.loads(s_data.get('audio_languages', '[]'))
             video_codec = s_data.get('video_codec', '')
             file_size = s_data.get('file_size', '')
+            season_info = s_data.get('season_info', '') # Get season info
+            episode_info = s_data.get('episode_info', '') # Get episode info
 
             # --- Constructing stream.name and stream.title for *individual stream* ---
             stream_name_parts = ["TamilBlasters"]
@@ -1021,6 +1074,16 @@ def stream(type, id):
             stream_name = " - ".join(stream_name_parts)
 
             stream_title_parts = [item.get('title', 'N/A')] # Base title from catalog item
+            
+            # Add season and episode info
+            se_parts = []
+            if season_info:
+                se_parts.append(season_info)
+            if episode_info:
+                se_parts.append(episode_info)
+            if se_parts:
+                stream_title_parts.append(" ".join(se_parts))
+
             if audio_languages:
                 stream_title_parts.append(f"[{', '.join(audio_languages)}]")
             if video_codec:
@@ -1124,7 +1187,9 @@ def update_rss_feed_and_catalog():
             'audio_languages': entry_data['audio_languages'], # Already JSON string
             'video_codec': entry_data['video_codec'],
             'file_size': entry_data['file_size'],
-            'pub_date': entry_data['pub_date'].isoformat() if entry_data['pub_date'] else datetime.now().isoformat()
+            'pub_date': entry_data['pub_date'].isoformat() if entry_data['pub_date'] else datetime.now().isoformat(),
+            'season_info': entry_data['season_info'], # Store parsed season info
+            'episode_info': entry_data['episode_info'] # Store parsed episode info
         }
         
         # Check if this specific stream (by infoHash) already exists for this base_stremio_id
