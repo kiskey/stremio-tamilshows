@@ -769,7 +769,7 @@ def meta(type, id):
 
             embedded_stremio_streams.append({
                 "name": stream_name, 
-                "description": f"Source: 1TamilBlasters - {description_quality}", 
+                "description": stream_title, # Set description to be the same as stream_title
                 "infoHash": info_hash,
                 "sources": stremio_sources, 
                 "title": stream_title
@@ -852,7 +852,7 @@ def stream(type, stremio_id):
 
             stremio_stream = {
                 "name": stream_name, 
-                "description": f"Source: 1TamilBlasters - {description_quality}", 
+                "description": stream_title, # Set description to be the same as stream_title
                 "infoHash": info_hash,
                 "sources": stremio_sources, 
                 "title": stream_title
