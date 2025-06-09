@@ -286,7 +286,7 @@ class DomainResolver:
             return initial_rss_feed_url # Fallback to initial if resolution fails
 
 # --- TMDB API Manager ---
-# TMDB API Manager is no longer used for ID generation, but kept for potential future use.
+# TMDB API Manager is no longer used for ID generation, but kept for reference if future meta needs arise.
 class TmdbManager:
     """Manages interactions with TMDB API for metadata."""
     def __init__(self, api_key):
@@ -410,10 +410,14 @@ class RSSParser:
                     description_html = entry.description
                     pub_date_str = entry.published
                     
-                    # Initialize variables
-                    title_base = "" # Will store the clean title part
+                    # --- FIX START: Initialize pub_date_dt here ---
+                    pub_date_dt = datetime.now() # Initialize with current datetime as a fallback
+                    # --- FIX END ---
+
+                    # Initialize other variables
+                    title_base = "" 
                     year = ""
-                    quality_details_raw = "" # Will store the full content of the last bracket
+                    quality_details_raw = "" 
                     audio_languages = []
                     video_codec = ""
                     file_size = ""
@@ -493,39 +497,30 @@ class RSSParser:
 
                     description_quality = quality_details_raw if quality_details_raw else "No description available."
 
-                    # --- Logic for parsing poster URL ---
+                    # --- Logic for parsing poster URL - REFINED ---
                     soup = BeautifulSoup(description_html, 'html.parser')
                     poster_url = ""
-                    
-                    # Strategy 1: Look for img within an 'a' tag with rel="external nofollow" and data-src
-                    main_poster_anchor = soup.find('a', attrs={'rel': 'external nofollow'})
-                    if main_poster_anchor:
-                        img_tag = main_poster_anchor.find('img', attrs={'data-src': True})
-                        if img_tag:
-                            temp_url = img_tag.get('data-src')
-                            if temp_url and "spacer.png" not in temp_url:
-                                poster_url = temp_url
-                                logger.debug(f"Poster found (Strategy 1 - data-src in external nofollow anchor): {poster_url}")
 
-                    # Strategy 2: Fallback to any img tag with data-src, excluding spacer.png
-                    if not poster_url:
-                        all_data_src_images = soup.find_all('img', attrs={'data-src': True})
-                        for img_tag in all_data_src_images:
-                            temp_url = img_tag.get('data-src')
-                            if temp_url and "spacer.png" not in temp_url:
-                                poster_url = temp_url
-                                logger.debug(f"Poster found (Strategy 2 - direct img[data-src]): {poster_url}")
-                                break # Take the first valid one found
+                    # Prioritize finding the main poster image with 'data-src'
+                    all_data_src_images = soup.find_all('img', attrs={'data-src': True})
+                    for img_tag in all_data_src_images:
+                        temp_url = img_tag.get('data-src')
+                        # Ensure it's a valid URL and not the placeholder spacer image
+                        if temp_url and not temp_url.endswith("spacer.png"):
+                            poster_url = temp_url
+                            logger.debug(f"Poster found (Priority Data-Src): {poster_url}")
+                            break # Found a good one, stop searching
 
-                    # Strategy 3: Final fallback to any img tag with src, excluding spacer.png
+                    # Fallback to img tags with 'src' if no 'data-src' image was found or valid
                     if not poster_url:
                         all_src_images = soup.find_all('img', attrs={'src': True})
                         for img_tag in all_src_images:
                             temp_url = img_tag.get('src')
-                            if temp_url and "spacer.png" not in temp_url:
+                            # Ensure it's a valid URL and not the placeholder spacer image
+                            if temp_url and not temp_url.endswith("spacer.png"):
                                 poster_url = temp_url
-                                logger.debug(f"Poster found (Strategy 3 - direct img[src]): {poster_url}")
-                                break # Take the first valid one found
+                                logger.debug(f"Poster found (Fallback Src): {poster_url}")
+                                break # Found a good one, stop searching
 
                     poster_url = poster_url or "" # Ensure it's an empty string if nothing valid found
                     if not poster_url:
@@ -539,6 +534,25 @@ class RSSParser:
                     stremio_id = f"tamilshows:{re.sub(r'[^a-zA-Z0-9]', '', title).lower()}{year or ''}"
                     if not stremio_id: # Fallback if original title also becomes empty
                         stremio_id = f"tamilshows:unknown{entry.guid or int(time.time() * 1000)}"
+
+                    # Parse pubDate to datetime object (after initial assignment)
+                    try:
+                        pub_date_dt = datetime.strptime(pub_date_str, '%a, %d %b %Y %H:%M:%S %z')
+                    except ValueError:
+                        try:
+                            pub_date_dt = datetime.strptime(pub_date_str, '%a, %d %b %Y %H:%M:%S %Z')
+                        except ValueError:
+                            logger.warning(f"Could not parse pubDate '{pub_date_str}' for '{title_full}'. Using current time.")
+                            # pub_date_dt already initialized, no need to re-assign unless different timezone is required
+                            # Fallback to current time, attempting to preserve timezone if available from parsed_published
+                            if entry.published_parsed:
+                                try:
+                                    pub_date_dt = datetime.now(entry.published_parsed.tzinfo)
+                                except Exception:
+                                    pub_date_dt = datetime.now()
+                            else:
+                                pub_date_dt = datetime.now()
+
 
                     # Add debug log for parsed information
                     logger.debug(f"Parsed Item: ID='{stremio_id}', Title='{title}', Year='{year}', "
@@ -559,11 +573,13 @@ class RSSParser:
                             'file_size': file_size,
                             'poster': poster_url,
                             'magnet_uri': magnet_uri,
-                            'pub_date': pub_date_dt, # Store as datetime object temporarily for sorting, convert to string for Redis
+                            'pub_date': pub_date_dt, # pub_date_dt is now guaranteed to be defined
                             'original_link': link
                         })
                 except Exception as item_e:
-                    logger.error(f"Error parsing RSS item: {item_e} (Title: {entry.get('title', 'N/A')})")
+                    # Now pub_date_dt will always be defined here, even if it's the initial datetime.now()
+                    # You can safely include it in the log message.
+                    logger.error(f"Error parsing RSS item: {item_e} (Title: {entry.get('title', 'N/A')}, PubDate String: {entry.get('published', 'N/A')})")
             logger.info(f"Successfully parsed {len(items_data)} items from RSS feed.")
         except requests.exceptions.RequestException as e:
             logger.error(f"Failed to fetch RSS feed from {feed_url}: {e}")
