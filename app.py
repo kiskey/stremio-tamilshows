@@ -31,6 +31,8 @@ DELETE_OLDER_THAN_YEARS = int(os.environ.get('DELETE_OLDER_THAN_YEARS', 2))
 TRACKERS_URL = os.environ.get('TRACKERS_URL', 'https://ngosang.github.io/trackerslist/trackers_all.txt')
 # Logging Level (e.g., 'DEBUG', 'INFO', 'WARNING', 'ERROR', 'CRITICAL')
 LOG_LEVEL = os.environ.get('LOG_LEVEL', 'INFO').upper()
+# Clear THIS APP's Redis cache on startup if 'true' or '1'
+CLEAR_REDIS_ON_STARTUP = os.environ.get('CLEAR_REDIS_ON_STARTUP', 'false').lower() == 'true'
 
 # --- Global Variables ---
 app = Flask(__name__)
@@ -183,6 +185,22 @@ class RedisManager:
         except Exception as e:
             logger.error(f"Error during old entry cleanup: {e}")
 
+    def clear_app_data(self):
+        """Clears only the data inserted by this application from the Redis database."""
+        try:
+            catalog_keys = self.client.keys("catalog:*")
+            stream_keys = self.client.keys("streams:*")
+            
+            all_app_keys = list(set(catalog_keys + stream_keys)) # Use set to avoid duplicates
+
+            if all_app_keys:
+                self.client.delete(*all_app_keys)
+                logger.info(f"Successfully cleared {len(all_app_keys)} application-specific keys from Redis database.")
+            else:
+                logger.info("No application-specific keys found in Redis to clear.")
+        except Exception as e:
+            logger.error(f"Error clearing application-specific data from Redis database: {e}")
+
 # --- Domain Resolver ---
 class DomainResolver:
     """Handles resolving the current domain of the RSS feed."""
@@ -327,12 +345,36 @@ class RSSParser:
                     description_html = entry.description
                     pub_date_str = entry.published
                     
-                    # Parse title, year, quality
-                    match = re.match(r"^(.*?)\s*\((\d{4})\)\[(.*?)\]", title_full)
-                    # Sanitize parsed values immediately
-                    title = (match.group(1).strip() if match else title_full.split('[')[0].strip()) or ""
-                    year = (match.group(2) if match else None) or ""
-                    quality_details = (match.group(3).strip() if match else None) or ""
+                    # Initialize variables
+                    title = ""
+                    year = ""
+                    quality_details = ""
+
+                    # 1. Extract quality details from the last square brackets if present
+                    quality_match = re.search(r"\[([^\[\]]+)\]$", title_full)
+                    if quality_match:
+                        quality_details = quality_match.group(1).strip()
+                        # Remove the quality part from the full title for further parsing
+                        remaining_title_for_year_title = title_full[:quality_match.start()].strip()
+                    else:
+                        remaining_title_for_year_title = title_full.strip() # No quality brackets found
+
+                    # 2. Extract year from the remaining title string
+                    year_match = re.search(r"\((\d{4})\)", remaining_title_for_year_title)
+                    if year_match:
+                        year = year_match.group(1)
+                        # Remove the year part for the base title
+                        title_before_year = remaining_title_for_year_title[:year_match.start()].strip()
+                        title_after_year = remaining_title_for_year_title[year_match.end():].strip()
+                        # Combine parts, ensuring spaces are handled
+                        title = (title_before_year + (" " if title_before_year and title_after_year else "") + title_after_year).strip()
+                    else:
+                        title = remaining_title_for_year_title.strip() # No year found
+
+                    # Ensure all extracted values are strings
+                    title = title or ""
+                    year = year or ""
+                    quality_details = quality_details or ""
 
                     # Parse description for poster and magnet link
                     soup = BeautifulSoup(description_html, 'html.parser')
@@ -343,8 +385,12 @@ class RSSParser:
                     magnet_link_tag = soup.find('a', class_='magnet-plugin', href=re.compile(r'magnet:\?xt=urn:btih:'))
                     magnet_uri = (magnet_link_tag['href'] if magnet_link_tag else None) or ""
 
-                    # Construct a unique ID for Stremio (e.g., from title and year)
-                    stremio_id = f"tamilshows:{re.sub(r'[^a-zA-Z0-9]', '', title).lower()}{year or ''}"
+                    # Construct a unique ID for Stremio
+                    stremio_id_base = re.sub(r'[^a-zA-Z0-9]', '', title).lower()
+                    if not stremio_id_base: # Fallback if title becomes empty
+                        stremio_id = f"tamilshows:unknown{entry.guid or int(time.time() * 1000)}"
+                    else:
+                        stremio_id = f"tamilshows:{stremio_id_base}{year or ''}"
                     
                     # Parse pubDate to datetime object
                     pub_date_dt = None
@@ -355,8 +401,11 @@ class RSSParser:
                             pub_date_dt = datetime.strptime(pub_date_str, '%a, %d %b %Y %H:%M:%S %Z')
                         except ValueError:
                             logger.warning(f"Could not parse pubDate '{pub_date_str}' for '{title_full}'. Using current time.")
-                            # Set timezone-aware datetime if possible, otherwise naive
                             pub_date_dt = datetime.now(entry.published_parsed.tzinfo if entry.published_parsed else None) or datetime.now()
+
+                    # Add debug log for parsed information
+                    logger.debug(f"Parsed Item: ID='{stremio_id}', Title='{title}', Year='{year}', "
+                                 f"Quality='{quality_details}', Poster='{poster_url}', Magnet='{magnet_uri}'")
 
 
                     if title and magnet_uri:
@@ -473,7 +522,7 @@ def stream(type, stremio_id):
                 "name": f"Quality: {quality}",
                 "description": f"Source: 1TamilBlasters - {quality}",
                 "infoHash": re.search(r'btih:([^&]+)', final_magnet_uri).group(1) if re.search(r'btih:([^&]+)', final_magnet_uri) else None,
-                "sources": [final_magnet_uri],
+                "sources": [final_magnet_uri], # The final_magnet_uri already includes all best trackers
                 "url": final_magnet_uri,
                 "title": f"{s_data.get('title', 'N/A')} ({quality})"
             }
@@ -592,6 +641,11 @@ def scheduled_cleanup_old_entries():
 if __name__ == '__main__':
     # Initialize Redis client
     redis_client = RedisManager(REDIS_HOST, REDIS_PORT, REDIS_DB)
+
+    # Check if Redis should be cleared on startup
+    if CLEAR_REDIS_ON_STARTUP:
+        logger.info("CLEAR_REDIS_ON_STARTUP is true. Clearing application-specific Redis cache...")
+        redis_client.clear_app_data() # Call the new method to clear only app data
 
     # Initialize Managers
     domain_resolver = DomainResolver(MASTER_DOMAIN, redis_client)
