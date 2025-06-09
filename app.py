@@ -494,40 +494,47 @@ class RSSParser:
                     working_title_for_base = raw_entry_title
                     
                     # 1. Extract year from anywhere in the title, and then remove it to simplify
-                    # This targets (YYYY) format specifically, ensuring it's a word boundary
+                    year = ""
                     year_match = re.search(r"\b\((\d{4})\)\b", working_title_for_base) 
                     if year_match:
                         year = year_match.group(1)
                         # Remove the year and its parentheses from the working title
                         working_title_for_base = working_title_for_base.replace(year_match.group(0), '').strip()
-                    else:
-                        year = ""
+                    
+                    # 2. Remove season and episode information
+                    # Common patterns: SXX, SXXEZZ, Season XX, Ep ZZ, E01-10, Part 1, Vol. 2
+                    season_episode_patterns = [
+                        r'\bS\d+E\d+(?:-\d+)?\b', # S01E01, S01E01-10
+                        r'\bS\d+\b',             # S01
+                        r'\bEP\s*\(\d+(?:-\d+)?\)\b', # EP(01-10)
+                        r'\bSeason\s+\d+\b',     # Season 1
+                        r'\bEpisode\s+\d+\b',    # Episode 1
+                        r'\bPart\s+\d+\b',       # Part 1
+                        r'\bVol(?:\.|ume)?\s+\d+\b' # Vol. 1, Volume 2
+                    ]
+                    for pattern in season_episode_patterns:
+                        working_title_for_base = re.sub(pattern, '', working_title_for_base, flags=re.IGNORECASE).strip()
 
-                    # 2. Aggressively remove common quality/codec/size patterns in brackets or at the end
-                    # Pattern for quality info in brackets: [RESOLUTION ... SIZE] or [LANGUAGES] or [CODEC] etc.
+                    # 3. Aggressively remove common quality/codec/size patterns in brackets or at the end
                     quality_pattern_in_brackets = r'\[\s*(?:(?:[A-Za-z0-9\s\+\-\.:\/]*?)(?:\d+p|4K|GB|MB|x\d+|DD\d+\.\d+|AC3|AAC|HDRip|WEB-DL|BluRay|BDRip|DVDRip|WebRip|AVC|HEVC|VP9|AV1|Dual Audio|Multi Audio|Org Audio|ESubs?)\s*[A-Za-z0-9\s\+\-\.:\/]*?)\s*\]'
                     working_title_for_base = re.sub(quality_pattern_in_brackets, '', working_title_for_base, flags=re.IGNORECASE).strip()
                     
-                    # Pattern for quality info at the end, not necessarily in brackets, after " - "
                     quality_pattern_at_end = r'\s*-\s*(?:\d+p|4K|GB|MB|x\d+|DD\d+\.\d+|AC3|AAC|HDRip|WEB-DL|BluRay|BDRip|DVDRip|WebRip|AVC|HEVC|VP9|AV1|ESubs?).*$'
                     working_title_for_base = re.sub(quality_pattern_at_end, '', working_title_for_base, flags=re.IGNORECASE).strip()
 
-                    # Remove any remaining trailing hyphens or spaces
-                    working_title_for_base = re.sub(r'[-\s]+$', '', working_title_for_base).strip()
-                    
-                    # Remove leading/trailing empty brackets if they are still there
+                    # 4. Remove any remaining trailing hyphens, dots, or spaces, and leading/trailing brackets
+                    working_title_for_base = re.sub(r'[.\-_\s]+$', '', working_title_for_base).strip()
                     working_title_for_base = re.sub(r'^\s*\[|\]\s*$', '', working_title_for_base).strip()
-
-                    # If after all cleaning, the title is empty, use a fallback
-                    title = working_title_for_base or raw_entry_title.split('[')[0].strip() or "Unknown Title"
+                    
+                    # Remove any leftover website indicators or release group names that might be at the beginning/end
+                    working_title_for_base = re.sub(r'^\s*www\.\w+\.[\w/]+\s*-\s*', '', working_title_for_base, flags=re.IGNORECASE).strip()
+                    # More cautious release group removal - targeting common patterns
+                    working_title_for_base = re.sub(r'\s*-\s*(?:ETRG|EVO|RARBG|YTS|FxM|CM|TamilRockers|TamilBlasters)\b.*$', '', working_title_for_base, flags=re.IGNORECASE).strip()
+                    
                     # Ensure no multiple spaces
-                    title = re.sub(r'\s+', ' ', title).strip()
-
-                    # Generate `base_stremio_id` (this will be the main ID for the catalog item)
-                    # It's crucial this ID is consistent for all qualities of the same show
-                    base_stremio_id = f"tamilshows:{re.sub(r'[^a-zA-Z0-9]', '', title).lower()}{year or ''}"
-                    if not base_stremio_id or "unknowntitle" in base_stremio_id.lower(): 
-                        base_stremio_id = f"tamilshows:unknown_item_{int(time.time() * 1000)}_{os.urandom(4).hex()}" # More unique fallback
+                    title = re.sub(r'\s+', ' ', working_title_for_base).strip()
+                    # Fallback if after all cleaning, the title is empty
+                    title = title or raw_entry_title.split('[')[0].strip() or "Unknown Title"
 
 
                     # --- REFINED quality_details_raw extraction from description_html ---
@@ -666,7 +673,7 @@ class RSSParser:
                     tmdb_poster_medium_url = ""
                     
                     if self.tmdb_manager.api_key: # Only try TMDb if API key is set
-                        tmdb_result, tmdb_type = self.tmdb_manager.search_movie_or_tv(title, year)
+                        tmdb_result, tmdb_type = self.tmdb_manager.search_movie_or_tv(title, year) # Use the cleaned 'title' for TMDb search
                         if tmdb_result and tmdb_result.get('poster_path'):
                             poster_path = tmdb_result['poster_path']
                             tmdb_poster_thumbnail_url = self.tmdb_manager.get_image_url(poster_path, "w185")
