@@ -423,117 +423,103 @@ class RSSParser:
                     video_codec = ""
                     file_size = ""
 
-
-                    # --- Logic for parsing title and quality ---
+                    # --- Logic for parsing title and year ---
                     # Clean title_full first: remove common suffixes and redundant spaces/hyphens
-                    # Also aggressively remove any leading/trailing brackets from the *full* title
                     cleaned_title_full = title_full.replace(" - ESub", "").replace(" -ESubs", "").strip()
                     cleaned_title_full = re.sub(r'^\s*\[|\]\s*$', '', cleaned_title_full).strip() # Remove leading/trailing brackets
-                    cleaned_title_full = re.sub(r'[-\s]+$', '', cleaned_title_full).strip() # Remove trailing hyphens/spaces before final bracket split
-                    
-                    # Split title_full by the LAST '[' to separate base title from potential quality/extra info
-                    title_parts_split_by_last_bracket = cleaned_title_full.rsplit('[', 1)
-                    
-                    # --- REFINED quality_details_raw extraction ---
-                    soup = BeautifulSoup(description_html, 'html.parser')
+                    cleaned_title_full = re.sub(r'[-\s]+$', '', cleaned_title_full).strip() # Remove trailing hyphens/spaces
 
-                    # Priority 1: Extract from the torrent attachment link text - MOST RELIABLE
-                    torrent_link_tag = soup.find('a', class_='ipsAttachLink', attrs={'data-fileext': 'torrent'})
-                    if torrent_link_tag and torrent_link_tag.string:
-                        torrent_filename_text = torrent_link_tag.string.strip()
-                        # Extract the bracketed part from the torrent filename (e.g., "[720p HDRip -[Tamil + ...]]")
-                        # This regex now correctly captures the part *before* the .torrent extension
-                        quality_match_from_filename = re.search(r'\[([^\]]+?)(?:\s*-\s*ESubs?)?\](?=.*\.torrent)', torrent_filename_text, re.IGNORECASE)
-                        if quality_match_from_filename:
-                            # Keep the brackets for consistency in quality_details_raw
-                            quality_details_raw = "[" + quality_match_from_filename.group(1).strip() + "]" 
-                            logger.debug(f"Extracted quality_details_raw from torrent filename: {quality_details_raw}")
-                    
-                    # Fallback 2: Extract from the original title_full (if torrent link didn't yield results)
-                    if not quality_details_raw and len(title_parts_split_by_last_bracket) > 1:
-                        potential_raw_from_title = "[" + title_parts_split_by_last_bracket[1].rstrip(']').strip() + "]"
-                        if potential_raw_from_title and potential_raw_from_title != "[]":
-                            quality_details_raw = potential_raw_from_title
-                            logger.debug(f"Extracted quality_details_raw from title_full (fallback): {quality_details_raw}")
-                    
-                    # Final cleanup of quality_details_raw - remove any lingering trailing hyphens or empty brackets
-                    quality_details_raw = re.sub(r'[-\s]+$', '', quality_details_raw).strip()
-                    quality_details_raw = re.sub(r'^\[\s*\]$', '', quality_details_raw).strip() # Remove "[]" if empty
-
-
-                    # --- Continue title parsing ---
-                    # Use the title parts from the original title_full split, but cleaned.
-                    if len(title_parts_split_by_last_bracket) > 1:
-                        title_candidate = title_parts_split_by_last_bracket[0].strip()
-                        title_candidate = re.sub(r'[-\s]+$', '', title_candidate).strip() # Remove trailing hyphens/spaces
-                    else:
-                        title_candidate = cleaned_title_full.strip() # Use the fully cleaned title if no brackets
-                        
-                    # Extract year (if present) from title_candidate
-                    year_match = re.search(r"\((\d{4})\)", title_candidate)
+                    # Extract year (if present) from anywhere in the title
+                    year_match = re.search(r"\((\d{4})\)", cleaned_title_full)
                     if year_match:
                         year = year_match.group(1)
-                        # Remove the year and its parentheses from the title_candidate to get clean title_base
-                        title_base = title_candidate.replace(year_match.group(0), '').strip()
+                        # Remove the year and its parentheses from the title to get clean title_base
+                        title_base = cleaned_title_full.replace(year_match.group(0), '').strip()
                     else:
                         year = ""
-                        title_base = title_candidate.strip()
+                        title_base = cleaned_title_full.strip()
 
-                    # Clean up title_base from potential trailing "S01 EP(01-12)" or similar if it's not the year
+                    # Clean up title_base from potential trailing "S01 EP(01-12)" or similar
                     episode_info_match = re.search(r'(S\d+E\d+|S\d+\s*EP\(\d+-\d+\)|Season \d+ Episode \d+)', title_base, re.IGNORECASE)
                     if episode_info_match:
                         title_base = title_base[:episode_info_match.start()].strip()
-                        title_base = re.sub(r'[-\s]+$', '', title_base).strip() # Clean trailing hyphens/spaces again
-                    
-                    # FINAL cleaning of the title (item.name)
                     title = re.sub(r'[:\s-]+$', '', title_base).strip() # Remove any remaining trailing colons, spaces, hyphens
                     if title.endswith(' -'): # handle cases like "Movie Name -"
                         title = title[:-2].strip()
+                    
+                    # --- REFINED quality_details_raw extraction from description_html ---
+                    soup_desc = BeautifulSoup(description_html, 'html.parser')
+                    
+                    # PRIORITY 1: Look for the torrent download link's text content. This is often the most accurate source.
+                    torrent_link_tag = soup_desc.find('a', class_='ipsAttachLink', attrs={'data-fileext': 'torrent'})
+                    if torrent_link_tag and torrent_link_tag.string:
+                        torrent_filename_text = torrent_link_tag.string.strip()
+                        # The quality string is often the last part of the filename, after title and year
+                        # Example: "www.1TamilBlasters.fi - Mercy For None S01 (2025)[720p HDRip -[Tamil + ...]].torrent"
+                        # Extract everything inside the last [] before .torrent and also remove optional ESubs
+                        quality_match_from_filename = re.search(r'\[([^\]]+?)(?:\s*-\s*ESubs?)?\](?=\.torrent)', torrent_filename_text, re.IGNORECASE)
+                        if quality_match_from_filename:
+                            quality_details_raw = quality_match_from_filename.group(1).strip()
+                            logger.debug(f"Extracted quality_details_raw from torrent filename: [{quality_details_raw}]")
+                    
+                    # If not found from torrent link text, FALLBACK: Check if the title itself has quality info
+                    if not quality_details_raw:
+                        title_quality_match = re.search(r'\[([^\]]+?)(?:\s*-\s*ESubs?)?\]$', title_full, re.IGNORECASE)
+                        if title_quality_match:
+                            quality_details_raw = title_quality_match.group(1).strip()
+                            logger.debug(f"Extracted quality_details_raw from title_full (fallback): [{quality_details_raw}]")
 
-                    # Final decision for extracted_quality_for_name
-                    # This section needs to produce a clean string without "Tamil + Telugu" if it's not a quality.
-                    # It should prioritize resolutions, then HDRip/HD, then other meaningful quality indicators.
-                    
-                    temp_quality_for_extraction = quality_details_raw # Use the robustly extracted quality_details_raw
-                    
-                    # Extract languages directly from the *raw* quality string and then remove them for quality/codec parsing
+                    # Final cleanup of quality_details_raw: remove any lingering "ESub" or "ESubs" and empty brackets
+                    quality_details_raw = re.sub(r'\s*-\s*ESubs?$', '', quality_details_raw, flags=re.IGNORECASE).strip()
+                    quality_details_raw = re.sub(r'^\s*\[|\]\s*$', '', quality_details_raw).strip() # Remove surrounding brackets
+                    quality_details_raw = re.sub(r'[-\s]+$', '', quality_details_raw).strip() # Remove trailing hyphens/spaces
+                    if quality_details_raw == "": # If it became empty after cleanup
+                        quality_details_raw = "N/A" # Default for internal use
+
+                    # --- REFINED Parsing for audio_languages, video_codec, file_size from quality_details_raw ---
+                    temp_quality_for_extraction = quality_details_raw # Work on a copy
+
+                    # Extract languages first and then remove them for other parsing
                     language_match_in_quality = re.search(r'\[([^\]]+?)\]', temp_quality_for_extraction) # Non-greedy match for languages
                     if language_match_in_quality:
                         languages_str = language_match_in_quality.group(1).strip()
                         audio_languages = [lang.strip() for lang in re.split(r'\s*\+\s*', languages_str)]
-                        # Now remove this language part from temp_quality_for_extraction for other details
+                        # Remove the matched language part from the string for subsequent parsing
                         temp_quality_for_extraction = temp_quality_for_extraction.replace(language_match_in_quality.group(0), '').strip()
-                        temp_quality_for_extraction = re.sub(r'[-\s]+$', '', temp_quality_for_extraction).strip() # Clean trailing hyphens/spaces again
+                        temp_quality_for_extraction = re.sub(r'[-\s]+$', '', temp_quality_for_extraction).strip() # Clean trailing hyphens/spaces
                     
-                    # Remove surrounding brackets from temp_quality_for_extraction if they still exist
+                    # Remove any remaining surrounding brackets from temp_quality_for_extraction
                     temp_quality_for_extraction = re.sub(r'^\s*\[|\]\s*$', '', temp_quality_for_extraction).strip()
 
+                    # Video Codec
+                    video_codec_match = re.search(r'(x264|H\.264|H\.265|HEVC|AVC|VP9|AV1|DVDRip|WebRip|BRRip|BDRip|BluRay)', temp_quality_for_extraction, re.IGNORECASE)
+                    if video_codec_match:
+                        video_codec = video_codec_match.group(1).upper()
+                    
+                    # File Size
+                    size_match = re.search(r'(\d+(\.\d+)?(?:GB|MB))', temp_quality_for_extraction, re.IGNORECASE)
+                    if size_match:
+                        file_size = size_match.group(1).upper()
+
+                    # Extracted Quality for Name (e.g., "1080P HDRip")
                     concise_quality_elements = []
-                    # Resolutions (4K, 1080p, 720p, 480p) - prioritize full word match
                     resolution_match = re.search(r'(\d+p|4K)', temp_quality_for_extraction, re.IGNORECASE)
                     if resolution_match:
                         concise_quality_elements.append(resolution_match.group(1).upper())
                     
-                    # General quality terms (HD, HDRip)
                     if re.search(r'HDRip', temp_quality_for_extraction, re.IGNORECASE):
                         concise_quality_elements.append('HDRip')
                     elif re.search(r'HD', temp_quality_for_extraction, re.IGNORECASE):
                         concise_quality_elements.append('HD')
+                    elif re.search(r'WebDL|WEB-DL', temp_quality_for_extraction, re.IGNORECASE):
+                        concise_quality_elements.append('WEB-DL')
+                    elif re.search(r'BluRay|BDRip', temp_quality_for_extraction, re.IGNORECASE):
+                        concise_quality_elements.append('BluRay')
                     
-                    # Video Codec (x264, H.264, H.265, HEVC, AVC)
-                    video_codec_match = re.search(r'(x264|H\.264|H\.265|HEVC|AVC)', temp_quality_for_extraction, re.IGNORECASE)
-                    if video_codec_match:
-                        video_codec = video_codec_match.group(1).upper()
-                    
-                    # File Size (e.g., 16.5GB, 800MB)
-                    size_match = re.search(r'(\d+(\.\d+)?(GB|MB))', temp_quality_for_extraction, re.IGNORECASE)
-                    if size_match:
-                        file_size = size_match.group(1).upper()
-
                     if concise_quality_elements:
                         extracted_quality_for_name = " ".join(concise_quality_elements)
-                    elif temp_quality_for_extraction: 
-                        # Fallback to first segment if no specific keywords, but ensure it's not just a codec
+                    elif temp_quality_for_extraction and temp_quality_for_extraction != "N/A": 
+                        # Fallback to first meaningful segment
                         parts = [p.strip() for p in temp_quality_for_extraction.split('-') if p.strip()]
                         meaningful_parts = [p for p in parts if not re.match(r'(x\d+|H\.264|H\.265|HEVC|AVC|DD\d+\.\d+|AAC|AC3)', p, re.IGNORECASE)]
                         if meaningful_parts:
@@ -541,77 +527,75 @@ class RSSParser:
                         else:
                             extracted_quality_for_name = "Standard Quality" # If only non-quality parts remain
                     else:
-                        extracted_quality_for_name = "Standard Quality" # More descriptive default
+                        extracted_quality_for_name = "Standard Quality" # More descriptive default if nothing found
 
-                    # description_quality should still reflect the full raw details for verbose description
-                    description_quality = quality_details_raw if quality_details_raw else "No additional quality details available."
+                    # Ensure all extracted values are strings
+                    title = title or ""
+                    year = year or ""
+                    quality_details_raw = quality_details_raw or "" # Ensure it's string, not None
+                    video_codec = video_codec or ""
+                    file_size = file_size or ""
 
-                    # --- Logic for parsing poster URL ---
-                    # The soup object is already created at the beginning of the try block.
+
+                    # --- REFINED Logic for parsing poster URL ---
                     poster_url = ""
 
-                    # Define known "bad" image patterns (emoticons, spacers, borders, small icons)
+                    # Define known "bad" image patterns (emoticons, spacers, borders, small icons, generic gifs)
                     BAD_IMAGE_PATTERNS = [
                         r'spacer\.png$', 
-                        r'emoticons/', # Catches all emoticons/gifs in that folder
+                        r'emoticons/', 
                         r'torrborder\.gif$', 
                         r'torrenticon_92x92_blue\.png$',
-                        r'92x92_blue\.png$', # More general if pattern varies
-                        r'magnet-link-icon\.png$', # If other common icons appear
-                        r'(\d+x\d+)\.(png|jpg|jpeg|gif)$' # Catches images with explicit small dimensions in filename, e.g. "92x92.png"
+                        r'92x92_blue\.png$', 
+                        r'magnet-link-icon\.png$', 
+                        r'(\d+x\d+)\.(png|jpg|jpeg|gif)$', # Catches images with explicit small dimensions in filename
+                        r'\.gif$' # General exclusion for .gif files, as they are often animations/emoticons
                     ]
 
                     # Function to check if an image tag is undesirable based on URL and optionally size
                     def is_undesirable_image(img_tag):
-                        # Get URL from either data-src or src attribute
                         url = img_tag.get('data-src') or img_tag.get('src')
                         if not url:
-                            return True # No valid URL to check
+                            return True
 
-                        # 1. Always prioritize checking against known bad URL patterns
                         for pattern in BAD_IMAGE_PATTERNS:
                             if re.search(pattern, url, re.IGNORECASE):
                                 logger.debug(f"Rejecting image by pattern: {url}")
-                                return True # This image is undesirable
+                                return True
 
-                        # 2. If not rejected by pattern, check dimensions if they are explicitly small
                         width = -1
                         height = -1
                         try:
                             width_str = img_tag.get('width')
-                            if width_str is not None:
-                                width = int(width_str)
+                            if width_str is not None: width = int(width_str)
                             height_str = img_tag.get('height')
-                            if height_str is not None:
-                                height = int(height_str)
+                            if height_str is not None: height = int(height_str)
                         except ValueError:
-                            # If attributes are not valid integers, treat as unknown size and don't use this check
-                            pass
+                            pass 
 
                         # If both dimensions are available and are very small (e.g., icons, buttons)
-                        if width > 0 and height > 0 and (width < 100 or height < 100): # Threshold for a "real" poster
+                        if width > 0 and height > 0 and (width < 100 or height < 100): 
                             logger.debug(f"Rejecting image by small explicit size: {url} ({width}x{height})")
                             return True
-
-                        # If it passed all checks, it's considered a desirable image
+                        
                         return False
 
-                    # Try to find a good poster with 'data-src' first, as suggested by XPath example
-                    # This will use the most specific image as the primary poster candidate
-                    img_candidates = soup.select('img[data-src]')
-                    for img_tag in img_candidates:
-                        if not is_undesirable_image(img_tag): # Check if it's not a bad image
+                    # Priority 1: Find images with data-src attribute that are NOT undesirable
+                    # This directly uses the CSS selector you suggested for data-src
+                    img_tags_data_src = soup_desc.select('img[data-src]')
+                    for img_tag in img_tags_data_src:
+                        if not is_undesirable_image(img_tag):
                             poster_url = img_tag['data-src']
-                            logger.debug(f"Selected poster URL (data-src, desirable): {poster_url}")
+                            logger.debug(f"Selected poster URL (data-src): {poster_url}")
                             break
                     
-                    # Fallback to 'src' if no suitable 'data-src' image was found
+                    # Fallback 2: If no good data-src image, try src attribute that are NOT undesirable
                     if not poster_url:
-                        img_candidates_src = soup.select('img[src]')
-                        for img_tag in img_candidates_src:
-                            if not is_undesirable_image(img_tag): # Check if it's not a bad image
+                        img_tags_src = soup_desc.select('img[src]')
+                        for img_tag in img_tags_src:
+                            if not is_undesirable_image(img_tag):
                                 poster_url = img_tag['src']
-                                logger.debug(f"Selected poster URL (src, desirable): {poster_url}")
+                                logger.debug(f"Selected poster URL (src fallback): {poster_url}")
                                 break
 
                     poster_url = poster_url or "" # Ensure it's an empty string if nothing valid found
@@ -619,7 +603,7 @@ class RSSParser:
                          logger.debug(f"Final check: Poster still not found for '{title}'. Poster URL: '{poster_url}'")
 
 
-                    magnet_link_tag = soup.find('a', class_='magnet-plugin', href=re.compile(r'magnet:\?xt=urn:btih:'))
+                    magnet_link_tag = soup_desc.find('a', class_='magnet-plugin', href=re.compile(r'magnet:\?xt=urn:btih:'))
                     magnet_uri = (magnet_link_tag['href'] if magnet_link_tag else None) or ""
 
                     # Construct stremio_id with custom prefix only
@@ -647,9 +631,9 @@ class RSSParser:
                                 pub_date_dt = datetime.now()
 
 
-                    # Add debug log for parsed information
+                    # Add debug log for parsed information - THIS IS KEY FOR DEBUGGING
                     logger.debug(f"Parsed Item: ID='{stremio_id}', Title='{title}', Year='{year}', "
-                                 f"Quality_Concise='{extracted_quality_for_name}', Quality_Full='{description_quality}', "
+                                 f"Quality_Concise='{extracted_quality_for_name}', Quality_Full='{quality_details_raw}', " # Use clean raw
                                  f"Audio_Languages='{audio_languages}', Video_Codec='{video_codec}', File_Size='{file_size}', "
                                  f"Poster='{poster_url}', Magnet='{magnet_uri}'")
 
@@ -659,7 +643,7 @@ class RSSParser:
                             'stremio_id': stremio_id,
                             'title': title,
                             'year': year,
-                            'quality_details': description_quality, # Full details for description
+                            'quality_details': quality_details_raw, # Store the cleaned raw details
                             'quality_for_name': extracted_quality_for_name, # Concise for stream name
                             'audio_languages': json.dumps(audio_languages), # Store as JSON string
                             'video_codec': video_codec,
@@ -669,13 +653,15 @@ class RSSParser:
                             'pub_date': pub_date_dt, 
                             'original_link': link
                         })
+                    else:
+                        logger.warning(f"Skipping item due to missing title or magnet: Title='{title}', Magnet Present={bool(magnet_uri)}")
                 except Exception as item_e:
-                    logger.error(f"Error parsing RSS item: {item_e} (Title: {entry.get('title', 'N/A')}, PubDate String: {entry.get('published', 'N/A')})")
+                    logger.error(f"Error parsing RSS item: {item_e} (Title: {entry.get('title', 'N/A')}, PubDate String: {entry.get('published', 'N/A')})", exc_info=True)
             logger.info(f"Successfully parsed {len(items_data)} items from RSS feed.")
         except requests.exceptions.RequestException as e:
             logger.error(f"Failed to fetch RSS feed from {feed_url}: {e}")
         except Exception as e:
-            logger.error(f"An unexpected error occurred during RSS parsing: {e}")
+            logger.error(f"An unexpected error occurred during RSS parsing: {e}", exc_info=True)
         
         return items_data
 
@@ -820,7 +806,7 @@ def meta(type, id):
             "name": item['title'], # Use the cleaned title from the item
             "poster": item['poster'],
             "posterShape": "poster", 
-            "description": item.get('quality_details', 'No description available.'),
+            "description": item.get('quality_details', 'No description available.'), # Use the cleaned raw details here
             "releaseInfo": item.get('year', ''),
             "genres": ["Tamil Shows", "Web Series"],
             "runtime": "",
