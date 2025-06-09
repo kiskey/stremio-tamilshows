@@ -730,6 +730,8 @@ class RSSParser:
                         })
                     else:
                         logger.warning(f"Skipping item due to missing title or magnet: Title='{title}', Magnet Present={bool(magnet_uri)}")
+                except Exception as item_e:
+                    logger.error(f"Error parsing RSS item: {item_e} (Title: {entry.get('title', 'N/A')}, PubDate String: {entry.get('published', 'N/A')})", exc_info=True)
             logger.info(f"Successfully parsed {len(items_data)} items from RSS feed.")
         except requests.exceptions.RequestException as e:
             logger.error(f"Failed to fetch RSS feed from {feed_url}: {e}")
