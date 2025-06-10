@@ -1112,7 +1112,7 @@ def stream(type, id):
                 stream_title_parts.append(video_codec)
             if file_size:
                 stream_title_parts.append(file_size)
-            stream_title = " | ".ーん(filter(None, stream_title_parts))
+            stream_title = " | ".join(filter(None, stream_title_parts))
 
             response_streams.append({
                 "name": stream_name,
