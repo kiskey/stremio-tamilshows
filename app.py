@@ -651,8 +651,9 @@ class RSSParser:
                     audio_languages = []
                     video_codec = ""
                     file_size = ""
-                    catalog_poster_url = "https://placehold.co/185x278/000000/FFFFFF?text=No+Poster"
-                    meta_poster_url = "https://placehold.co/500x750/000000/FFFFFF?text=No+Poster"
+                    # Use the new default poster URL
+                    catalog_poster_url = "https://upload.wikimedia.org/wikipedia/commons/8/80/Vijay_tv_picsart_.jpg"
+                    meta_poster_url = "https://upload.wikimedia.org/wikipedia/commons/8/80/Vijay_tv_picsart_.jpg"
                     magnet_uri = ""
                     pub_date_dt = datetime.now() # Fallback for pub_date
                     season_info = "" # Initialize new season info
@@ -802,10 +803,10 @@ class RSSParser:
                         meta_poster_url = tmdb_poster_medium_url or meta_poster_from_rss
 
                         if not catalog_poster_url:
-                            catalog_poster_url = "https://placehold.co/185x278/000000/FFFFFF?text=No+Poster"
+                            catalog_poster_url = "https://upload.wikimedia.org/wikipedia/commons/8/80/Vijay_tv_picsart_.jpg"
                             logger.warning(f"Using generic placeholder for catalog poster for '{title}'.")
                         if not meta_poster_url:
-                            meta_poster_url = "https://placehold.co/500x750/000000/FFFFFF?text=No+Poster"
+                            meta_poster_url = "https://upload.wikimedia.org/wikipedia/commons/8/80/Vijay_tv_picsart_.jpg"
                             logger.warning(f"Using generic placeholder for meta poster for '{title}'.")
 
 
